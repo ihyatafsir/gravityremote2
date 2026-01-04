@@ -1,12 +1,22 @@
 # GravityRemote
 
-> 🌐 Access your Antigravity AI Agent through any web browser
+> 🌐 Access your Antigravity AI Agent through any web browser - **Now with true remote access!**
 
 GravityRemote provides a web-based interface for the Antigravity IDE, allowing you to interact with your AI agent remotely from any device with a browser.
 
-![Version](https://img.shields.io/badge/version-1.0.0-blue)
+![Version](https://img.shields.io/badge/version-2.0.0-blue)
 ![Python](https://img.shields.io/badge/python-3.8+-green)
 ![License](https://img.shields.io/badge/license-MIT-orange)
+
+---
+
+## 🆕 What's New in v2.0
+
+- **True Remote Access** - Access from any device on your network or via Tailscale
+- **Smart URL Patching** - Automatically rewrites internal URLs for external access
+- **Dynamic LSP Discovery** - Auto-detects the language server port on startup
+- **Proper HTTP Handling** - Uses Python's http library for reliable request/response handling
+- **Base64 Parameter Patching** - Patches encoded configuration for seamless remote connectivity
 
 ---
 
@@ -18,135 +28,89 @@ GravityRemote provides a web-based interface for the Antigravity IDE, allowing y
 - **Code Viewer** - Syntax-highlighted file display
 - **WebSocket Communication** - Real-time bidirectional messaging
 - **Mobile Optimized** - Responsive design with automatic viewport injection
+- **Remote Access** - Access from any device on your network
 
 ---
 
 ## 📋 Prerequisites
 
-- **Antigravity IDE** installed and running
-- **Python 3.8+** with `websockets` library
-- Network access to the Antigravity instance
-
-```bash
-# Install required Python package
-pip install websockets
-```
+- **Antigravity IDE** installed and running on the host machine
+- **Python 3.8+** (no additional packages required for basic functionality)
+- Network access to the Antigravity host
 
 ---
 
-## 🚀 Installation
+## 🚀 Quick Start (v2.0 - Remote Access)
 
-### Step 1: Clone the Repository
+### Step 1: Clone and Run
 
 ```bash
 git clone https://github.com/ihyatafsir/gravityremote.git
 cd gravityremote
+python3 tcp_forward.py
 ```
 
-### Step 2: Configure Workspace Path (Optional)
+### Step 2: Access from Any Device
 
-Edit `websocket_server.py` to set your workspace directory:
-
-```python
-WORKSPACE = "/path/to/your/workspace"  # Default: /root/Documents/REMOTEGRAVITY
-```
-
----
-
-## 🏃 Running GravityRemote
-
-### Option A: Start All Services (Recommended)
-
-```bash
-# Start all services in background
-python3 websocket_server.py &
-python3 http_proxy.py &
-python3 proxy_server.py &
-python3 -m http.server 9090 &
-```
-
-### Option B: Using a Start Script
-
-Create `start.sh`:
-```bash
-#!/bin/bash
-echo "Starting GravityRemote..."
-
-# Kill any existing instances
-pkill -f "websocket_server.py" 2>/dev/null
-pkill -f "http_proxy.py" 2>/dev/null
-pkill -f "proxy_server.py" 2>/dev/null
-
-# Start services
-python3 websocket_server.py &
-python3 http_proxy.py &
-python3 proxy_server.py &
-python3 -m http.server 9090 &
-
-echo "GravityRemote is running!"
-echo "Access: http://localhost:8890"
-```
-
-```bash
-chmod +x start.sh
-./start.sh
-```
-
----
-
-## 🌐 Accessing the Interface
-
-| URL | Description |
-|-----|-------------|
-| `http://localhost:8890` | **Main Entry** - Mobile optimized with proxy |
-| `http://localhost:9090` | Direct access to web interface |
-| `http://localhost:9092` | Antigravity native chat (if available) |
-
-### Remote Access
-
-To access from another device on your network:
-1. Replace `localhost` with your machine's IP address
-2. Ensure ports 8888, 8889, 8890, 9090 are accessible
+The script will display your external IP. Access from any device:
 
 ```
 http://<your-ip>:8890
 ```
 
+That's it! The proxy automatically:
+- Detects the Antigravity LSP port
+- Patches URLs for remote access
+- Handles CORS and authentication headers
+
 ---
 
-## 🏗️ Architecture
+## 🏗️ Architecture (v2.0)
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                      Web Browser                            │
-│                  http://localhost:8890                      │
+│                    Remote Device                            │
+│                http://<your-ip>:8890                        │
 └─────────────────────────┬───────────────────────────────────┘
                           │
                           ▼
 ┌─────────────────────────────────────────────────────────────┐
-│              HTTP Proxy (Port 8890)                         │
-│         - Mobile optimization injection                      │
-│         - CORS headers                                       │
-└─────────────────────────┬───────────────────────────────────┘
+│              tcp_forward.py (Proxy Server)                  │
+│   Port 8890 (UI) ──────► 127.0.0.1:9090 (Agent Tab)        │
+│   Port 8891 (LSP) ─────► 127.0.0.1:xxxxx (Dynamic)         │
+│                                                             │
+│   • Rewrites Host headers                                   │
+│   • Patches Base64-encoded chatParams                       │
+│   • Dynamic LSP port discovery                              │
+└─────────────────────────────────────────────────────────────┘
                           │
-          ┌───────────────┼───────────────┐
-          ▼               ▼               ▼
-┌──────────────┐  ┌──────────────┐  ┌──────────────┐
-│ Static Server│  │  WebSocket   │  │  Antigravity │
-│  (Port 9090) │  │  (Port 8888) │  │  (Port 9092) │
-│  index.html  │  │  File Ops    │  │  Real Agent  │
-└──────────────┘  └──────────────┘  └──────────────┘
+                          ▼
+┌─────────────────────────────────────────────────────────────┐
+│                  Antigravity IDE                            │
+│     Port 9090 (Agent Tab) + Dynamic LSP Port               │
+└─────────────────────────────────────────────────────────────┘
 ```
+
+---
+
+## 🔧 Configuration
 
 ### Port Reference
 
 | Port | Service | Description |
 |------|---------|-------------|
-| 8888 | WebSocket Server | Real-time communication, file operations |
-| 8889 | TCP Proxy | Generic TCP forwarding to port 9090 |
-| 8890 | HTTP Proxy | Main entry with mobile optimization |
-| 9090 | Static Server | Serves the web interface |
-| 9092 | Antigravity Chat | Native agent chat (auto-detected) |
+| 8890 | UI Proxy | Main entry point for remote access |
+| 8891 | LSP Proxy | Language server communication |
+| 9090 | Agent Tab | Antigravity internal UI (localhost only) |
+| Dynamic | LSP | Language server (auto-detected) |
+
+### Changing Ports
+
+Edit `tcp_forward.py`:
+```python
+UI_PORT = 8890   # Change to your preferred port
+LSP_PORT = 8891  # Change to your preferred port
+```
 
 ---
 
@@ -154,70 +118,33 @@ http://<your-ip>:8890
 
 ```
 gravityremote/
-├── index.html          # Main IDE web interface
-├── websocket_server.py # WebSocket backend + file operations
-├── http_proxy.py       # HTTP proxy with mobile injection
-├── proxy_server.py     # Async TCP proxy
-├── README.md           # This file
-├── .gitignore          # Git ignore rules
-└── test_*.py           # Test scripts
+├── tcp_forward.py       # v2.0 Remote access proxy (main script)
+├── index.html           # Web interface
+├── websocket_server.py  # WebSocket backend for file operations
+├── http_proxy.py        # v1.0 HTTP proxy (legacy)
+├── proxy_server.py      # v1.0 TCP proxy (legacy)
+├── README.md            # This file
+└── .gitignore           # Git ignore rules
 ```
-
----
-
-## ⚙️ Configuration
-
-### Changing the Workspace
-
-In `websocket_server.py`:
-```python
-WORKSPACE = "/your/custom/path"
-```
-
-### Changing Ports
-
-Edit the respective `PORT` variable in each file:
-- `websocket_server.py` - WebSocket port (default: 8888)
-- `http_proxy.py` - HTTP proxy port (default: 8890)
-- `proxy_server.py` - TCP proxy port (default: 8889)
-
-### Enabling Remote Access
-
-By default, servers bind to `0.0.0.0`, allowing remote connections. Ensure your firewall permits the required ports.
 
 ---
 
 ## 🔧 Troubleshooting
 
-### "Connection Refused" Error
-- Ensure all services are running: `ps aux | grep python`
-- Check if Antigravity is running: `ps aux | grep antigravity`
+### Page loads but chat doesn't respond
+- The proxy auto-patches URLs, but if the Antigravity LSP port changed, restart the proxy:
+  ```bash
+  pkill -f tcp_forward.py
+  python3 tcp_forward.py
+  ```
 
-### Agent Chat Not Loading
-- Verify Antigravity is running on port 9092
-- Check with: `curl http://127.0.0.1:9092`
+### Connection refused on external IP
+- Make sure no firewall is blocking ports 8890 and 8891
+- Verify Antigravity is running: `ps aux | grep antigravity`
 
-### WebSocket Disconnects
-- Check if `websocket_server.py` is running
-- Look for errors: `python3 websocket_server.py` (foreground)
-
-### Files Not Showing
-- Verify `WORKSPACE` path exists and is readable
-- Check permissions: `ls -la /path/to/workspace`
-
----
-
-## 🛠️ Development
-
-### Running Tests
-```bash
-python3 test_proxy.py    # Test TCP proxy
-python3 test_input.py    # Test WebSocket input
-python3 demo_test.py     # Demo shell commands
-```
-
-### Modifying the UI
-Edit `index.html` - the interface is built with vanilla HTML/CSS/JavaScript for easy customization.
+### "Something went wrong" error
+- Check the proxy console for `[PATCH]` messages
+- Ensure the LSP port was correctly detected
 
 ---
 

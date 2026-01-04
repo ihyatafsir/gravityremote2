@@ -5,3 +5,6 @@ __pycache__/
 .DS_Store
 *.swp
 *.swo
+venv/
+proxy.log
+agent_stream.log
