@@ -1,0 +1,664 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Antigravity IDE - Web</title>
+    <style>
+        :root {
+            --bg-primary: #1e1e1e;
+            --bg-secondary: #252526;
+            --bg-tertiary: #2d2d2d;
+            --bg-hover: #3c3c3c;
+            --border: #3c3c3c;
+            --text-primary: #cccccc;
+            --text-secondary: #858585;
+            --text-accent: #569cd6;
+            --accent-blue: #007acc;
+            --accent-green: #4ec9b0;
+            --accent-orange: #ce9178;
+            --accent-purple: #c586c0;
+            --scrollbar-bg: #1e1e1e;
+            --scrollbar-thumb: #424242;
+            --font-mono: 'Consolas', 'Monaco', 'Courier New', monospace;
+            --font-ui: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: var(--font-ui);
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        /* Header / Title Bar */
+        .titlebar {
+            height: 35px;
+            background: var(--bg-tertiary);
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            padding: 0 15px;
+            font-size: 13px;
+            gap: 15px;
+        }
+
+        .titlebar .brand {
+            color: var(--accent-blue);
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .titlebar .brand::before {
+            content: '◆';
+            font-size: 14px;
+        }
+
+        .titlebar .connection {
+            margin-left: auto;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 12px;
+            color: var(--text-secondary);
+        }
+
+        .indicator {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #f44336;
+        }
+
+        .indicator.connected {
+            background: #4caf50;
+        }
+
+        /* Main Layout */
+        .main-container {
+            flex: 1;
+            display: flex;
+            overflow: hidden;
+        }
+
+        /* Sidebar - File Explorer */
+        .sidebar {
+            width: 250px;
+            background: var(--bg-secondary);
+            border-right: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+        }
+
+        .sidebar-header {
+            padding: 10px 15px;
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: var(--text-secondary);
+            border-bottom: 1px solid var(--border);
+        }
+
+        .file-tree {
+            flex: 1;
+            overflow-y: auto;
+            padding: 5px 0;
+        }
+
+        .file-item {
+            padding: 4px 15px;
+            font-size: 13px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            color: var(--text-primary);
+        }
+
+        .file-item:hover {
+            background: var(--bg-hover);
+        }
+
+        .file-item.active {
+            background: var(--bg-tertiary);
+        }
+
+        .file-icon {
+            font-size: 14px;
+        }
+
+        .file-icon.folder {
+            color: #dcb67a;
+        }
+
+        .file-icon.file {
+            color: var(--text-secondary);
+        }
+
+        .file-icon.py {
+            color: #3572a5;
+        }
+
+        .file-icon.html {
+            color: #e44d26;
+        }
+
+        .file-icon.js {
+            color: #f7df1e;
+        }
+
+        .file-icon.md {
+            color: #519aba;
+        }
+
+        /* Center Area */
+        .center-area {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        /* Tabs Bar */
+        .tabs-bar {
+            height: 35px;
+            background: var(--bg-tertiary);
+            display: flex;
+            align-items: flex-end;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .tab {
+            padding: 8px 20px;
+            font-size: 13px;
+            cursor: pointer;
+            border-right: 1px solid var(--border);
+            background: var(--bg-secondary);
+            color: var(--text-secondary);
+        }
+
+        .tab.active {
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            border-bottom: 2px solid var(--accent-blue);
+        }
+
+        /* Editor / Viewer */
+        .editor-area {
+            flex: 1;
+            display: flex;
+            overflow: hidden;
+        }
+
+        .code-viewer {
+            flex: 1;
+            overflow: auto;
+            font-family: var(--font-mono);
+            font-size: 13px;
+            line-height: 1.5;
+            padding: 15px;
+            background: var(--bg-primary);
+            white-space: pre-wrap;
+            color: var(--text-primary);
+        }
+
+        .code-viewer .line-number {
+            display: inline-block;
+            width: 40px;
+            color: var(--text-secondary);
+            text-align: right;
+            padding-right: 15px;
+            user-select: none;
+        }
+
+        /* Chat Panel (Bottom) */
+        .chat-panel {
+            height: 300px;
+            background: var(--bg-secondary);
+            border-top: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+        }
+
+        .chat-header {
+            padding: 8px 15px;
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: var(--text-secondary);
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            justify-content: space-between;
+        }
+
+        .chat-messages {
+            flex: 1;
+            overflow-y: auto;
+            padding: 10px 15px;
+            font-size: 13px;
+        }
+
+        .message {
+            margin-bottom: 12px;
+            line-height: 1.4;
+        }
+
+        .message .sender {
+            font-weight: 600;
+            margin-bottom: 2px;
+        }
+
+        .message.user .sender {
+            color: var(--accent-blue);
+        }
+
+        .message.agent .sender {
+            color: var(--accent-green);
+        }
+
+        .message.system .sender {
+            color: var(--accent-orange);
+        }
+
+        .message .content {
+            color: var(--text-primary);
+            font-family: var(--font-mono);
+            white-space: pre-wrap;
+        }
+
+        .chat-input-area {
+            padding: 10px 15px;
+            border-top: 1px solid var(--border);
+            display: flex;
+            gap: 10px;
+        }
+
+        .chat-input-area input {
+            flex: 1;
+            background: var(--bg-primary);
+            border: 1px solid var(--border);
+            color: var(--text-primary);
+            padding: 8px 12px;
+            font-family: var(--font-mono);
+            font-size: 13px;
+            border-radius: 4px;
+            outline: none;
+        }
+
+        .chat-input-area input:focus {
+            border-color: var(--accent-blue);
+        }
+
+        .chat-input-area button {
+            background: var(--accent-blue);
+            color: white;
+            border: none;
+            padding: 8px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 13px;
+            font-weight: 500;
+        }
+
+        .chat-input-area button:hover {
+            opacity: 0.9;
+        }
+
+        /* Right Sidebar - Status */
+        .status-panel {
+            width: 250px;
+            background: var(--bg-secondary);
+            border-left: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+        }
+
+        .status-header {
+            padding: 10px 15px;
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: var(--text-secondary);
+            border-bottom: 1px solid var(--border);
+        }
+
+        .status-content {
+            flex: 1;
+            overflow-y: auto;
+            padding: 15px;
+            font-size: 12px;
+        }
+
+        .status-item {
+            margin-bottom: 15px;
+        }
+
+        .status-label {
+            color: var(--text-secondary);
+            margin-bottom: 5px;
+            font-size: 11px;
+            text-transform: uppercase;
+        }
+
+        .status-value {
+            color: var(--text-primary);
+            font-family: var(--font-mono);
+        }
+
+        .task-list {
+            margin-top: 10px;
+        }
+
+        .task-item {
+            padding: 8px 10px;
+            background: var(--bg-tertiary);
+            border-radius: 4px;
+            margin-bottom: 5px;
+            font-size: 12px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .task-item .check {
+            color: var(--accent-green);
+        }
+
+        /* Scrollbar Styling */
+        ::-webkit-scrollbar {
+            width: 10px;
+            height: 10px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: var(--scrollbar-bg);
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: var(--scrollbar-thumb);
+            border-radius: 5px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: #555;
+        }
+
+        /* Responsive */
+        @media (max-width: 900px) {
+
+            .sidebar,
+            .status-panel {
+                display: none;
+            }
+        }
+    </style>
+</head>
+
+<body>
+
+    <!-- Title Bar -->
+    <header class="titlebar">
+        <div class="brand">Antigravity IDE</div>
+        <span style="color: var(--text-secondary);">RemoteGravity Web Client</span>
+        <div class="connection">
+            <div id="conn-indicator" class="indicator"></div>
+            <span id="conn-status">Disconnected</span>
+        </div>
+    </header>
+
+    <!-- Main Container -->
+    <div class="main-container">
+
+        <!-- Left Sidebar: File Explorer -->
+        <aside class="sidebar">
+            <div class="sidebar-header">Explorer</div>
+            <div id="file-tree" class="file-tree">
+                <!-- Files populated by JS -->
+                <div class="file-item" style="color: var(--text-secondary); padding: 20px;">Loading files...</div>
+            </div>
+        </aside>
+
+        <!-- Center Area -->
+        <main class="center-area">
+            <!-- Tabs -->
+            <div class="tabs-bar">
+                <div class="tab active" id="tab-welcome">Welcome</div>
+            </div>
+
+            <!-- Editor -->
+            <div class="editor-area">
+                <div id="code-viewer" class="code-viewer">
+                    <span style="color: var(--accent-purple);">Welcome to Antigravity IDE - Web Edition</span>
+
+                    <span style="color: var(--text-secondary);">─────────────────────────────────────────</span>
+
+                    This is a web-based interface for interacting with the
+                    Antigravity Agent. You can:
+
+                    • <span style="color: var(--accent-green);">Chat</span> with the Agent using the panel below
+                    • <span style="color: var(--accent-green);">Browse</span> workspace files in the left sidebar
+                    • <span style="color: var(--accent-green);">View</span> file contents by clicking on them
+                    • <span style="color: var(--accent-green);">Monitor</span> agent status in the right panel
+
+                    <span style="color: var(--text-secondary);">To get started, type a message in the chat input
+                        below.</span>
+                </div>
+            </div>
+
+            <!-- Chat Panel - Real Agent -->
+            <div class="chat-panel">
+                <div class="chat-header">
+                    <span>Antigravity Agent (Live)</span>
+                    <span style="color: var(--accent-green);">● Connected</span>
+                </div>
+                <iframe id="agent-frame" src="http://127.0.0.1:9092"
+                    style="flex: 1; border: none; background: var(--bg-primary);"
+                    allow="clipboard-read; clipboard-write"></iframe>
+            </div>
+        </main>
+
+        <!-- Right Sidebar: Status -->
+        <aside class="status-panel">
+            <div class="status-header">Agent Status</div>
+            <div class="status-content">
+                <div class="status-item">
+                    <div class="status-label">Mode</div>
+                    <div class="status-value" id="agent-mode">IDLE</div>
+                </div>
+                <div class="status-item">
+                    <div class="status-label">Current Task</div>
+                    <div class="status-value" id="agent-task">None</div>
+                </div>
+                <div class="status-item">
+                    <div class="status-label">Session ID</div>
+                    <div class="status-value">#1847FA47</div>
+                </div>
+                <div class="status-item">
+                    <div class="status-label">Workspace</div>
+                    <div class="status-value">/root/Documents/REMOTEGRAVITY</div>
+                </div>
+                <div class="status-label" style="margin-top: 20px;">Recent Tasks</div>
+                <div class="task-list" id="task-list">
+                    <div class="task-item"><span class="check">✓</span> TCP Proxy Refactor</div>
+                    <div class="task-item"><span class="check">✓</span> Cockpit UI Design</div>
+                    <div class="task-item"><span class="check">✓</span> Bidirectional Stream</div>
+                </div>
+            </div>
+        </aside>
+
+    </div>
+
+    <script>
+        // WebSocket connection
+        const wsUrl = 'ws://' + window.location.hostname + ':8888';
+        let ws;
+        let reconnectTimer;
+
+        const connIndicator = document.getElementById('conn-indicator');
+        const connStatus = document.getElementById('conn-status');
+        const chatMessages = document.getElementById('chat-messages');
+        const chatInput = document.getElementById('chat-input');
+        const sendBtn = document.getElementById('send-btn');
+        const fileTree = document.getElementById('file-tree');
+        const codeViewer = document.getElementById('code-viewer');
+
+        function connect() {
+            ws = new WebSocket(wsUrl);
+
+            ws.onopen = () => {
+                connIndicator.classList.add('connected');
+                connStatus.textContent = 'Connected';
+                addMessage('System', 'Connected to Agent bridge.');
+
+                // Request file list
+                ws.send(JSON.stringify({ type: 'list_files', path: '/root/Documents/REMOTEGRAVITY' }));
+            };
+
+            ws.onclose = () => {
+                connIndicator.classList.remove('connected');
+                connStatus.textContent = 'Disconnected';
+                addMessage('System', 'Connection lost. Reconnecting...');
+                reconnectTimer = setTimeout(connect, 3000);
+            };
+
+            ws.onerror = (err) => {
+                console.error('WebSocket error:', err);
+            };
+
+            ws.onmessage = (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    handleMessage(data);
+                } catch (e) {
+                    console.error('Parse error:', e);
+                }
+            };
+        }
+
+        function handleMessage(data) {
+            switch (data.type) {
+                case 'chat':
+                    addMessage(data.sender || 'Agent', data.content);
+                    break;
+                case 'stream':
+                    appendStream(data.content);
+                    break;
+                case 'file_list':
+                    renderFileTree(data.files);
+                    break;
+                case 'file_content':
+                    displayFile(data.filename, data.content);
+                    break;
+                case 'status':
+                    updateStatus(data);
+                    break;
+            }
+        }
+
+        function addMessage(sender, content) {
+            const div = document.createElement('div');
+            const senderClass = sender.toLowerCase().includes('agent') ? 'agent' :
+                sender.toLowerCase().includes('user') ? 'user' : 'system';
+            div.className = `message ${senderClass}`;
+            div.innerHTML = `<div class="sender">${sender}</div><div class="content">${escapeHtml(content)}</div>`;
+            chatMessages.appendChild(div);
+            chatMessages.scrollTop = chatMessages.scrollHeight;
+        }
+
+        let streamDiv = null;
+        function appendStream(content) {
+            if (!streamDiv) {
+                streamDiv = document.createElement('div');
+                streamDiv.className = 'message agent';
+                streamDiv.innerHTML = `<div class="sender">Agent</div><div class="content"></div>`;
+                chatMessages.appendChild(streamDiv);
+            }
+            streamDiv.querySelector('.content').textContent += content;
+            chatMessages.scrollTop = chatMessages.scrollHeight;
+        }
+
+        function renderFileTree(files) {
+            fileTree.innerHTML = '';
+            files.forEach(f => {
+                const div = document.createElement('div');
+                div.className = 'file-item';
+                const ext = f.name.split('.').pop();
+                let iconClass = 'file';
+                if (f.isDir) iconClass = 'folder';
+                else if (ext === 'py') iconClass = 'py';
+                else if (ext === 'html') iconClass = 'html';
+                else if (ext === 'js') iconClass = 'js';
+                else if (ext === 'md') iconClass = 'md';
+
+                const icon = f.isDir ? '📁' : '📄';
+                div.innerHTML = `<span class="file-icon ${iconClass}">${icon}</span> ${f.name}`;
+                div.onclick = () => {
+                    if (!f.isDir) {
+                        ws.send(JSON.stringify({ type: 'read_file', path: f.path }));
+                    }
+                };
+                fileTree.appendChild(div);
+            });
+        }
+
+        function displayFile(filename, content) {
+            // Update tab
+            document.querySelector('.tab.active').textContent = filename;
+
+            // Show content with line numbers
+            const lines = content.split('\n');
+            let html = '';
+            lines.forEach((line, i) => {
+                html += `<span class="line-number">${i + 1}</span>${escapeHtml(line)}\n`;
+            });
+            codeViewer.innerHTML = html;
+        }
+
+        function updateStatus(data) {
+            if (data.mode) document.getElementById('agent-mode').textContent = data.mode;
+            if (data.task) document.getElementById('agent-task').textContent = data.task;
+        }
+
+        function sendMessage() {
+            const text = chatInput.value.trim();
+            if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
+
+            ws.send(JSON.stringify({ type: 'chat', content: text }));
+            addMessage('You', text);
+            chatInput.value = '';
+            streamDiv = null; // Reset stream div for next response
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        // Event Listeners
+        sendBtn.addEventListener('click', sendMessage);
+        chatInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') sendMessage();
+        });
+
+        // Initialize
+        connect();
+    </script>
+</body>
+
+</html>
