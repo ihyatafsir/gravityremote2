@@ -85,7 +85,9 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             if port == LSP_PORT and CSRF_TOKEN:
                 headers['x-codeium-csrf-token'] = CSRF_TOKEN
             
-            conn = http.client.HTTPConnection(target_host, target_port, timeout=120)
+            conn = http.client.HTTPConnection(target_host, target_port, timeout=600)
+            # Enable TCP keepalive to prevent idle disconnects
+            conn.sock = None  # Will be set on connect
             conn.request(method, self.path, body, headers)
             response = conn.getresponse()
             
@@ -229,6 +231,19 @@ if (typeof crypto.randomUUID !== 'function') {
 class ThreadedHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     allow_reuse_address = True
     daemon_threads = True
+    timeout = 600  # Socket timeout for long-idle connections
+    
+    def server_bind(self):
+        # Enable TCP keepalive on the server socket
+        self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        # Linux-specific keepalive tuning
+        try:
+            self.socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 60)   # Start keepalive after 60s idle
+            self.socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 30)  # Send keepalive every 30s
+            self.socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 10)    # 10 retries before giving up
+        except AttributeError:
+            pass  # Not all platforms support these
+        super().server_bind()
 
 def main():
     global LSP_TARGET_PORT
