@@ -27,7 +27,7 @@ EXTERNAL_IP = get_external_ip()
 UI_PORT = 8890
 LSP_PORT = 8891
 MOBILE_PORT = 8892  # Mobile-friendly interface
-UI_TARGET = ('127.0.0.1', 9090)
+UI_TARGET = ('127.0.0.1', 9091)
 LSP_TARGET_PORT = 37417
 CSRF_TOKEN = None  # Will be extracted from chatParams
 
@@ -44,6 +44,20 @@ def find_lsp_port():
         pass
     return 37417
 
+def find_csrf_token():
+    """Extract CSRF token from language_server command line"""
+    import subprocess
+    try:
+        result = subprocess.run(['ps', 'aux'], capture_output=True, text=True)
+        for line in result.stdout.split('\n'):
+            if 'language_server' in line and 'csrf_token' in line:
+                match = re.search(r'csrf_token\s+([a-f0-9-]+)', line)
+                if match:
+                    return match.group(1)
+    except:
+        pass
+    return None
+
 class ProxyHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self): self.proxy_request('GET')
     def do_POST(self): self.proxy_request('POST')
@@ -58,14 +72,21 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         self.send_header('Access-Control-Allow-Credentials', 'true')
         self.end_headers()
     
-    def log_message(self, *args): pass
+    def log_message(self, format, *args):
+        print(f"[REQ] {self.client_address[0]} - {format % args}")
     
     def proxy_request(self, method):
         global LSP_TARGET_PORT, CSRF_TOKEN
         port = self.server.server_address[1]
         
         try:
-            if port in (UI_PORT, MOBILE_PORT):
+            # LSP requests can come on any port - detect by path
+            is_lsp_request = self.path.startswith('/exa.')
+            
+            if is_lsp_request:
+                # Route to LSP backend
+                target_host, target_port = '127.0.0.1', LSP_TARGET_PORT
+            elif port in (UI_PORT, MOBILE_PORT):
                 target_host, target_port = UI_TARGET
             else:
                 target_host, target_port = '127.0.0.1', LSP_TARGET_PORT
@@ -82,17 +103,26 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             headers['Host'] = f'{target_host}:{target_port}'
             
             # Inject CSRF token for LSP requests
-            if port == LSP_PORT and CSRF_TOKEN:
+            if is_lsp_request and CSRF_TOKEN:
                 headers['x-codeium-csrf-token'] = CSRF_TOKEN
             
-            conn = http.client.HTTPConnection(target_host, target_port, timeout=600)
+            # LSP backend requires HTTPS
+            if is_lsp_request:
+                import ssl
+                context = ssl.create_default_context()
+                context.check_hostname = False
+                context.verify_mode = ssl.CERT_NONE
+                conn = http.client.HTTPSConnection(target_host, target_port, timeout=600, context=context)
+            else:
+                conn = http.client.HTTPConnection(target_host, target_port, timeout=600)
             # Enable TCP keepalive to prevent idle disconnects
             conn.sock = None  # Will be set on connect
             conn.request(method, self.path, body, headers)
             response = conn.getresponse()
             
-            # For LSP: Stream response immediately for lower latency
-            if port == LSP_PORT:
+            # For LSP requests: Stream response immediately for lower latency
+            # This applies to all ports since mobile sends LSP requests on 8892
+            if is_lsp_request:
                 self.send_response(response.status)
                 for k, v in response.getheaders():
                     if k.lower() not in ['transfer-encoding', 'connection']:
@@ -114,7 +144,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 
                 if port in (UI_PORT, MOBILE_PORT) and 'text/html' in response.getheader('Content-Type', ''):
                     is_mobile = (port == MOBILE_PORT)
-                    response_body = self.patch_html(response_body, mobile=is_mobile)
+                    response_body = self.patch_html(response_body, mobile=is_mobile, incoming_port=port)
                 
                 self.send_response(response.status)
                 for k, v in response.getheaders():
@@ -131,7 +161,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             print(f"[ERROR] {e}")
             self.send_error(502, str(e))
     
-    def patch_html(self, body, mobile=False):
+    def patch_html(self, body, mobile=False, incoming_port=None):
         """Patch Base64-encoded chatParams for remote access"""
         global LSP_TARGET_PORT, CSRF_TOKEN
         
@@ -201,20 +231,17 @@ if (typeof crypto.randomUUID !== 'function') {
                 old_b64 = match.group(1)
                 params = json.loads(base64.b64decode(old_b64))
                 
-                # Extract port from URL - this is correct because it's paired with the CSRF token
-                orig_url = params.get('languageServerUrl', '')
-                port_match = re.search(r':(\d+)/', orig_url)
-                if port_match:
-                    LSP_TARGET_PORT = int(port_match.group(1))
+                # Note: We no longer extract the port from chatParams URL as it may be stale
+                # or point to the remapped proxy. find_lsp_port() gives us the real port.
                 
-                # Extract and store CSRF token (paired with the port above)
-                token = params.get('csrfToken', '')
-                if token:
-                    CSRF_TOKEN = token
-                    print(f"[SYNC] CSRF Token: {token[:16]}...")
+                # Note: We no longer extract CSRF token from chatParams as it may be stale
+                # after IDE restart. find_csrf_token() at startup gives us the real token.
                 
                 # Update URLs to point to our proxy
-                new_url = f'http://{EXTERNAL_IP}:{LSP_PORT}/'
+                # For mobile: use same port (8892) to avoid CORS issues
+                # For desktop: use dedicated LSP port (8891)
+                lsp_port_to_use = incoming_port if incoming_port == MOBILE_PORT else LSP_PORT
+                new_url = f'http://{EXTERNAL_IP}:{lsp_port_to_use}/'
                 params['languageServerUrl'] = new_url
                 params['httpLanguageServerUrl'] = new_url
                 
@@ -246,14 +273,16 @@ class ThreadedHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
         super().server_bind()
 
 def main():
-    global LSP_TARGET_PORT
+    global LSP_TARGET_PORT, CSRF_TOKEN
     LSP_TARGET_PORT = find_lsp_port()
+    CSRF_TOKEN = find_csrf_token()
     
     print("=" * 60)
     print("Antigravity Remote Access Proxy v2.2")
     print("=" * 60)
     print(f"External IP: {EXTERNAL_IP}")
     print(f"LSP Port: {LSP_TARGET_PORT}")
+    print(f"CSRF Token: {CSRF_TOKEN[:16] if CSRF_TOKEN else 'NOT FOUND'}...")
     print(f"\nUI:     http://0.0.0.0:{UI_PORT} -> http://127.0.0.1:9091")
     print(f"Mobile: http://0.0.0.0:{MOBILE_PORT} -> http://127.0.0.1:9091 (mobile-optimized)")
     print(f"LSP:    http://0.0.0.0:{LSP_PORT} -> http://127.0.0.1:{LSP_TARGET_PORT}")
