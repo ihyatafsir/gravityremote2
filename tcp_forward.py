@@ -29,34 +29,165 @@ LSP_PORT = 8891
 MOBILE_PORT = 8892  # Mobile-friendly interface
 UI_TARGET = ('127.0.0.1', 9091)
 LSP_TARGET_PORT = 37417
+LSP_USE_HTTPS = True  # Auto-detected based on what the LSP port accepts
 CSRF_TOKEN = None  # Will be extracted from chatParams
 
 def find_lsp_port():
+    """Find LSP port - prefer the language_server with workspace_id, select HTTP-responding port"""
     import subprocess
     try:
-        result = subprocess.run(['ss', '-tunlp'], capture_output=True, text=True)
-        for line in result.stdout.split('\n'):
-            if 'language_server' in line:
+        # First, find the PID of the workspace language_server
+        ps_result = subprocess.run(['ps', 'aux'], capture_output=True, text=True)
+        workspace_pid = None
+        fallback_pid = None
+        for line in ps_result.stdout.split('\n'):
+            if 'language_server' in line and 'csrf_token' in line:
+                pid_match = re.search(r'\s+(\d+)\s+', line)
+                if pid_match:
+                    pid = pid_match.group(1)
+                    if 'workspace_id' in line:
+                        workspace_pid = pid
+                    elif not fallback_pid:
+                        fallback_pid = pid
+        
+        target_pid = workspace_pid or fallback_pid
+        if not target_pid:
+            return 37417
+        
+        # Find ALL ports for that PID
+        ss_result = subprocess.run(['ss', '-tunlp'], capture_output=True, text=True)
+        candidate_ports = []
+        for line in ss_result.stdout.split('\n'):
+            if f'pid={target_pid}' in line:
                 match = re.search(r'127\.0\.0\.1:(\d+)', line)
                 if match:
-                    return int(match.group(1))
+                    candidate_ports.append(int(match.group(1)))
+        
+        # Test each port - prefer one that responds to HTTP with 400/404 (not connection error)
+        for port in candidate_ports:
+            try:
+                conn = http.client.HTTPConnection('127.0.0.1', port, timeout=1)
+                conn.request('GET', '/')
+                resp = conn.getresponse()
+                conn.close()
+                # Any HTTP response means this port works for HTTP
+                if resp.status in [400, 404, 200]:
+                    return port
+            except:
+                pass
+        
+        # Return first port if none responded to HTTP
+        if candidate_ports:
+            return candidate_ports[0]
     except:
         pass
     return 37417
 
+
 def find_csrf_token():
-    """Extract CSRF token from language_server command line"""
+    """Extract CSRF token from language_server command line - prefer workspace server"""
     import subprocess
     try:
         result = subprocess.run(['ps', 'aux'], capture_output=True, text=True)
+        workspace_token = None
+        fallback_token = None
         for line in result.stdout.split('\n'):
             if 'language_server' in line and 'csrf_token' in line:
                 match = re.search(r'csrf_token\s+([a-f0-9-]+)', line)
                 if match:
-                    return match.group(1)
+                    token = match.group(1)
+                    # Prefer the one with workspace_id (active workspace server)
+                    if 'workspace_id' in line:
+                        workspace_token = token
+                    elif not fallback_token:
+                        fallback_token = token
+        return workspace_token or fallback_token
     except:
         pass
     return None
+
+def probe_lsp_protocol(port):
+    """Probe LSP port to determine if it uses HTTP or HTTPS"""
+    import ssl
+    # Try HTTP first (simpler and more common for newer servers)
+    try:
+        conn = http.client.HTTPConnection('127.0.0.1', port, timeout=2)
+        conn.request('GET', '/')
+        resp = conn.getresponse()
+        conn.close()
+        return False  # HTTP works
+    except:
+        pass
+    
+    # Try HTTPS
+    try:
+        context = ssl.create_default_context()
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+        conn = http.client.HTTPSConnection('127.0.0.1', port, timeout=2, context=context)
+        conn.request('GET', '/')
+        resp = conn.getresponse()
+        conn.close()
+        return True  # HTTPS works
+    except:
+        pass
+    
+    return True  # Default to HTTPS if can't determine
+
+def find_active_ide_port():
+    """Auto-detect the active Antigravity IDE UI port (prefer newest = highest port)"""
+    for port in [9092, 9091, 9090]:
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(0.5)
+            result = s.connect_ex(('127.0.0.1', port))
+            s.close()
+            if result == 0:
+                return port
+        except:
+            pass
+    return 9090  # fallback
+
+def health_check_loop():
+    """Background thread - checks IDE port and CSRF token every 10s, auto-updates if changed"""
+    global UI_TARGET, LSP_TARGET_PORT, CSRF_TOKEN, LSP_USE_HTTPS
+    import time
+    
+    while True:
+        time.sleep(10)
+        
+        # Check if current UI port is still active
+        current_ui_port = UI_TARGET[1]
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(1)
+            result = s.connect_ex(('127.0.0.1', current_ui_port))
+            s.close()
+            if result != 0:
+                # Port failed - find new one
+                new_port = find_active_ide_port()
+                if new_port != current_ui_port:
+                    print(f"[HEALTH] IDE port switch: {current_ui_port} -> {new_port}")
+                    UI_TARGET = ('127.0.0.1', new_port)
+        except:
+            pass
+        
+        # Refresh LSP port and protocol
+        new_lsp = find_lsp_port()
+        if new_lsp != LSP_TARGET_PORT:
+            print(f"[HEALTH] LSP port switch: {LSP_TARGET_PORT} -> {new_lsp}")
+            LSP_TARGET_PORT = new_lsp
+            # Re-probe protocol for new port
+            new_https = probe_lsp_protocol(new_lsp)
+            if new_https != LSP_USE_HTTPS:
+                print(f"[HEALTH] LSP protocol: {'HTTPS' if LSP_USE_HTTPS else 'HTTP'} -> {'HTTPS' if new_https else 'HTTP'}")
+                LSP_USE_HTTPS = new_https
+        
+        # Refresh CSRF token
+        new_token = find_csrf_token()
+        if new_token and new_token != CSRF_TOKEN:
+            print(f"[HEALTH] CSRF token updated: {new_token[:16]}...")
+            CSRF_TOKEN = new_token
 
 class ProxyHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self): self.proxy_request('GET')
@@ -106,13 +237,16 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             if is_lsp_request and CSRF_TOKEN:
                 headers['x-codeium-csrf-token'] = CSRF_TOKEN
             
-            # LSP backend requires HTTPS
+            # LSP backend may use HTTP or HTTPS depending on version
             if is_lsp_request:
-                import ssl
-                context = ssl.create_default_context()
-                context.check_hostname = False
-                context.verify_mode = ssl.CERT_NONE
-                conn = http.client.HTTPSConnection(target_host, target_port, timeout=600, context=context)
+                if LSP_USE_HTTPS:
+                    import ssl
+                    context = ssl.create_default_context()
+                    context.check_hostname = False
+                    context.verify_mode = ssl.CERT_NONE
+                    conn = http.client.HTTPSConnection(target_host, target_port, timeout=600, context=context)
+                else:
+                    conn = http.client.HTTPConnection(target_host, target_port, timeout=600)
             else:
                 conn = http.client.HTTPConnection(target_host, target_port, timeout=600)
             # Enable TCP keepalive to prevent idle disconnects
@@ -273,22 +407,30 @@ class ThreadedHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
         super().server_bind()
 
 def main():
-    global LSP_TARGET_PORT, CSRF_TOKEN
+    global LSP_TARGET_PORT, CSRF_TOKEN, UI_TARGET, LSP_USE_HTTPS
+    
+    # Auto-detect ports and CSRF at startup
+    ide_port = find_active_ide_port()
+    UI_TARGET = ('127.0.0.1', ide_port)
     LSP_TARGET_PORT = find_lsp_port()
+    LSP_USE_HTTPS = probe_lsp_protocol(LSP_TARGET_PORT)
     CSRF_TOKEN = find_csrf_token()
     
+    lsp_protocol = 'https' if LSP_USE_HTTPS else 'http'
     print("=" * 60)
-    print("Antigravity Remote Access Proxy v2.2")
+    print("Antigravity Remote Access Proxy v2.5 (Auto Protocol)")
     print("=" * 60)
     print(f"External IP: {EXTERNAL_IP}")
-    print(f"LSP Port: {LSP_TARGET_PORT}")
+    print(f"IDE Port: {ide_port} (auto-detected)")
+    print(f"LSP Port: {LSP_TARGET_PORT} ({lsp_protocol})")
     print(f"CSRF Token: {CSRF_TOKEN[:16] if CSRF_TOKEN else 'NOT FOUND'}...")
-    print(f"\nUI:     http://0.0.0.0:{UI_PORT} -> http://127.0.0.1:9091")
-    print(f"Mobile: http://0.0.0.0:{MOBILE_PORT} -> http://127.0.0.1:9091 (mobile-optimized)")
-    print(f"LSP:    http://0.0.0.0:{LSP_PORT} -> http://127.0.0.1:{LSP_TARGET_PORT}")
+    print(f"\nUI:     http://0.0.0.0:{UI_PORT} -> http://127.0.0.1:{ide_port}")
+    print(f"Mobile: http://0.0.0.0:{MOBILE_PORT} -> http://127.0.0.1:{ide_port} (mobile-optimized)")
+    print(f"LSP:    http://0.0.0.0:{LSP_PORT} -> {lsp_protocol}://127.0.0.1:{LSP_TARGET_PORT}")
     print(f"\nAccess:")
     print(f"  Desktop: http://{EXTERNAL_IP}:{UI_PORT}")
     print(f"  Mobile:  http://{EXTERNAL_IP}:{MOBILE_PORT}")
+    print(f"\n[AUTO] Health check thread monitors IDE/LSP ports every 10s")
     
     ui_server = ThreadedHTTPServer(('0.0.0.0', UI_PORT), ProxyHandler)
     mobile_server = ThreadedHTTPServer(('0.0.0.0', MOBILE_PORT), ProxyHandler)
@@ -297,9 +439,11 @@ def main():
     t1 = threading.Thread(target=ui_server.serve_forever, daemon=True)
     t2 = threading.Thread(target=mobile_server.serve_forever, daemon=True)
     t3 = threading.Thread(target=lsp_server.serve_forever, daemon=True)
+    t4 = threading.Thread(target=health_check_loop, daemon=True)  # Auto port-switch
     t1.start()
     t2.start()
     t3.start()
+    t4.start()
     
     print("\nPress Ctrl+C to stop\n")
     try:
