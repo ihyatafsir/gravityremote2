@@ -114,7 +114,11 @@ def probe_lsp_protocol(port):
         conn = http.client.HTTPConnection('127.0.0.1', port, timeout=2)
         conn.request('GET', '/')
         resp = conn.getresponse()
+        body = resp.read().decode('utf-8', errors='ignore')
         conn.close()
+        # Check if server says it needs HTTPS
+        if 'HTTP request to an HTTPS server' in body:
+            return True  # Server says it needs HTTPS
         return False  # HTTP works
     except:
         pass
@@ -133,6 +137,7 @@ def probe_lsp_protocol(port):
         pass
     
     return True  # Default to HTTPS if can't determine
+
 
 def find_active_ide_port():
     """Auto-detect the active Antigravity IDE UI port (prefer newest = highest port)"""
