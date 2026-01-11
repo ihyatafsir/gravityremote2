@@ -4,7 +4,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Antigravity Mobile</title>
+    <title>GravityRemote Mobile</title>
     <style>
         :root {
             --bg-primary: #0d0d0d;
@@ -40,10 +40,10 @@
             overflow: hidden;
         }
 
-        /* Header */
+        /* Header - Compact */
         .header {
-            background: linear-gradient(180deg, var(--bg-secondary) 0%, var(--bg-primary) 100%);
-            padding: 15px 20px;
+            background: var(--bg-secondary);
+            padding: 8px 15px;
             border-bottom: 1px solid var(--border);
             display: flex;
             justify-content: space-between;
@@ -51,12 +51,9 @@
         }
 
         .brand {
-            font-size: 18px;
-            font-weight: 700;
+            font-size: 14px;
+            font-weight: 600;
             color: var(--accent-blue);
-            display: flex;
-            align-items: center;
-            gap: 10px;
         }
 
         .brand::before {
@@ -98,28 +95,25 @@
             }
         }
 
-        /* Control Panel */
+        /* Control Panel - Compact */
         .control-panel {
-            padding: 15px 20px;
+            padding: 8px 10px;
             display: flex;
-            gap: 10px;
-            flex-wrap: wrap;
+            gap: 6px;
         }
 
         .control-btn {
             flex: 1;
-            min-width: 140px;
-            padding: 14px 20px;
+            padding: 8px 10px;
             border: none;
-            border-radius: 12px;
-            font-size: 14px;
+            border-radius: 8px;
+            font-size: 11px;
             font-weight: 600;
             cursor: pointer;
             display: flex;
             align-items: center;
             justify-content: center;
-            gap: 8px;
-            transition: all 0.2s;
+            gap: 4px;
         }
 
         .control-btn:active {
@@ -179,16 +173,12 @@
             width: 100%;
             height: 100%;
             border: none;
+            filter: invert(0.88) hue-rotate(180deg);
         }
 
-        /* Footer */
+        /* Footer - Hidden for more space */
         .footer {
-            padding: 15px 20px;
-            background: var(--bg-secondary);
-            border-top: 1px solid var(--border);
-            font-size: 11px;
-            color: var(--text-secondary);
-            text-align: center;
+            display: none;
         }
 
         /* Modal */
@@ -307,10 +297,10 @@
 
     <!-- Header -->
     <header class="header">
-        <div class="brand">Antigravity</div>
+        <div class="brand">GravityRemote</div>
         <div class="status-badge">
             <div id="status-dot" class="status-dot"></div>
-            <span id="status-text">Connecting...</span>
+            <span id="status-text">...</span>
         </div>
     </header>
 
@@ -330,8 +320,8 @@
     <!-- Agent Chat -->
     <div class="chat-container">
         <div class="chat-header">
-            <span>Antigravity Agent</span>
-            <span id="conn-label" style="color: var(--accent-green);">● Live</span>
+            <span>Agent</span>
+            <span id="conn-label" style="color: var(--accent-green);">● LIVE</span>
         </div>
         <div class="agent-frame-wrapper">
             <iframe id="agent-frame" src="" allow="clipboard-read; clipboard-write"></iframe>
