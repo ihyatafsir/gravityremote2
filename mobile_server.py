@@ -12,8 +12,34 @@ import os
 import psutil
 from urllib.parse import urlparse
 
+
+import random
+
 PORT = 8893
 DIRECTORY = os.path.dirname(os.path.abspath(__file__))
+
+# Load Lisan al-Arab Corpus
+LISAN_CORPUS = []
+try:
+    lisan_path = os.path.join(DIRECTORY, 'lisanclean.json')
+    if os.path.exists(lisan_path):
+        with open(lisan_path, 'r', encoding='utf-8') as f:
+            raw_data = json.load(f)
+            # Flatten or use as is depending on structure. 
+            # Assuming lisanclean.json is a dict where values are definitions, 
+            # or a list of sentences. The KI says "values".
+            # Let's inspect it to be safe, but for now assuming it needs parsing.
+            # Ideally we grab somewhat long strings.
+            if isinstance(raw_data, dict):
+                LISAN_CORPUS = list(raw_data.values())
+            elif isinstance(raw_data, list):
+                LISAN_CORPUS = raw_data
+            
+            print(f"[Mobile Server] Loaded {len(LISAN_CORPUS)} Lisan entries")
+    else:
+        print("[Mobile Server] Warning: lisanclean.json not found")
+except Exception as e:
+    print(f"[Mobile Server] Failed to load Lisan corpus: {e}")
 
 class MobileHandler(http.server.SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
@@ -27,9 +53,41 @@ class MobileHandler(http.server.SimpleHTTPRequestHandler):
             self.path = '/mobile.html'
         elif parsed.path == '/api/stats':
             return self.handle_stats()
+        elif parsed.path == '/api/lisan':
+            return self.handle_lisan()
         
         return super().do_GET()
     
+    def handle_lisan(self):
+        """Return random Lisan al-Arab sentences"""
+        try:
+            # Select 10 random entries
+            count = 10
+            if not LISAN_CORPUS:
+                sample = [
+                    "البَرْقُ سَرِيعُ اللَّمْعِ",
+                    "الأَدَبُ الَّذِي يَتَأَدَّبُ بِهِ الأَدِيبُ"
+                ]
+            else:
+                sample = random.sample(LISAN_CORPUS, min(count, len(LISAN_CORPUS)))
+                
+                # Sanitize: Ensure they are strings
+                sample = [str(s) for s in sample]
+
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json; charset=utf-8')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            # Prevent mobile caching of the random sample
+            self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
+            self.end_headers()
+            
+            self.wfile.write(json.dumps(sample, ensure_ascii=False).encode('utf-8'))
+        except Exception as e:
+            self.send_response(500)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({'error': str(e)}).encode())
+
     def handle_stats(self):
         """Return CPU and RAM usage for retro display"""
         try:
@@ -160,6 +218,7 @@ def main():
 ╚════════════════════════════════════════╝
     """)
     
+    socketserver.TCPServer.allow_reuse_address = True
     with socketserver.TCPServer(("", PORT), MobileHandler) as httpd:
         print(f"[Mobile Server] Running on http://0.0.0.0:{PORT}")
         print(f"[Mobile Server] Mobile UI: http://localhost:{PORT}/mobile")

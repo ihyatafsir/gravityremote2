@@ -125,6 +125,7 @@
             align-items: center;
             justify-content: center;
             gap: 4px;
+            backdrop-filter: blur(4px);
         }
 
         .control-btn:active {
@@ -132,22 +133,22 @@
         }
 
         .btn-restart {
-            background: linear-gradient(135deg, #116611 0%, #0a440a 100%);
+            background: rgba(17, 102, 17, 0.4);
             color: var(--accent-green);
-            border: 1px solid var(--accent-green-dark);
+            border: 1px solid rgba(34, 170, 34, 0.6);
             text-shadow: 0 0 5px var(--accent-green);
         }
 
         .btn-refresh {
-            background: var(--bg-tertiary);
+            background: rgba(26, 26, 26, 0.6);
             color: var(--accent-green);
-            border: 1px solid var(--accent-green-dark);
+            border: 1px solid rgba(34, 170, 34, 0.4);
         }
 
         .btn-agent {
-            background: linear-gradient(135deg, #114411 0%, #082808 100%);
+            background: rgba(17, 68, 17, 0.4);
             color: var(--accent-green);
-            border: 1px solid var(--accent-green-dark);
+            border: 1px solid rgba(34, 170, 34, 0.6);
             text-shadow: 0 0 5px var(--accent-green);
         }
 
@@ -353,57 +354,96 @@
             text-transform: uppercase;
         }
 
-        .live-badge {
-            font-size: 9px;
+        text-shadow: 0 0 8px var(--accent-green);
+        }
+
+        .stat-compact {
+            display: flex;
+            align-items: center;
+            gap: 2px;
+        }
+
+        .stat-label-tiny {
+            font-size: 8px;
+            color: #666;
             font-family: var(--font-mono);
+        }
+
+        .stat-val-tiny {
+            font-size: 9px;
             color: var(--accent-green);
-            text-shadow: 0 0 8px var(--accent-green);
+            font-family: var(--font-digital);
+            min-width: 25px;
+            text-align: right;
         }
 
-        /* Lisan al-Arab Scrolling Text - Two Parallel Strips */
+        /* Lisan al-Arab Scrolling Text - Block System */
         .lisan-banners {
-            background: #050505;
+            background: #080808;
+            /* Slightly lighter/richer black */
             border-bottom: 1px solid var(--border);
-            padding: 2px 0;
+            height: 38px;
+            /* Compact height */
             overflow: hidden;
+            position: relative;
+            display: flex;
+            align-items: center;
         }
 
-        .lisan-strip {
-            overflow: hidden;
-            white-space: nowrap;
-            line-height: 1.2;
-        }
-
-        .lisan-strip-arabic {
+        .lisan-marquee-container {
+            display: flex;
+            flex-direction: row;
+            /* RTL handled by order or direction */
             direction: rtl;
+            /* Sets the flow: Item 1 on Right, Item 2 Left */
+            position: absolute;
+            white-space: nowrap;
+            height: 100%;
+            align-items: center;
+            will-change: transform;
         }
 
-        .lisan-strip-latin {
-            direction: ltr;
+        .word-block {
+            display: inline-flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            margin: 0 5px;
+            /* Tighter spacing */
+            flex-shrink: 0;
+            padding-bottom: 2px;
+            /* Visual balance */
         }
 
-        .marquee-text {
-            display: inline-block;
-            padding-right: 50px;
-            /* Animation handled by JavaScript for synchronized speed */
-        }
-
-        .marquee-arabic {
-            font-size: 15px;
+        .word-arabic {
+            font-size: 16px;
+            /* +1px */
             font-family: 'Amiri', 'Traditional Arabic', 'Scheherazade', serif;
             color: var(--accent-green);
-            text-shadow: 0 0 10px var(--accent-green), 0 0 20px var(--accent-green-dark);
-            letter-spacing: 0;
-            word-spacing: 8px;
+            text-shadow: 0 0 10px var(--accent-green);
+            line-height: 1;
+            margin-bottom: 0px;
+            /* No gap */
         }
 
-        .marquee-latin {
-            font-size: 10px;
+        .word-latin {
+            font-size: 9px;
+            /* +1px */
             font-family: var(--font-mono);
             color: #22cc22;
-            text-shadow: 0 0 6px #22cc22;
-            letter-spacing: 2px;
-            word-spacing: 12px;
+            /* Slightly darker/different green for contrast */
+            text-shadow: 0 0 5px #22cc22;
+            letter-spacing: 0.5px;
+            line-height: 1;
+            direction: ltr;
+            /* Internal text direction for reversed chars (m-a-l-a-s) */
+        }
+
+        .lisan-separator {
+            color: rgba(50, 255, 100, 0.6);
+            text-shadow: 0 0 8px rgba(50, 255, 100, 0.8);
+            font-size: 10px;
+            margin: 0 15px;
         }
     </style>
 </head>
@@ -414,26 +454,25 @@
     <header class="header">
         <div class="brand" id="brand-toggle" onclick="toggleHeaders()">◆ GRAVITYREMOTE</div>
         <div class="header-right">
+            <!-- CPU/RAM Compact -->
+            <div class="stat-compact">
+                <span class="stat-label-tiny">CPU</span>
+                <span class="stat-val-tiny" id="cpu-stat">--%</span>
+            </div>
+            <div class="stat-compact">
+                <span class="stat-label-tiny">RAM</span>
+                <span class="stat-val-tiny" id="ram-stat">--MB</span>
+            </div>
+
             <span class="agent-badge">Agent</span>
-            <span id="conn-label" class="live-badge">● LIVE</span>
+            <span id="conn-label" class="live-badge">●</span>
             <div class="status-badge">
                 <div id="status-dot" class="status-dot"></div>
-                <span id="status-text">INIT</span>
             </div>
         </div>
     </header>
 
-    <!-- System Stats - 80s Digital -->
-    <div class="system-stats">
-        <div class="stat-item">
-            <span class="stat-label">CPU:</span>
-            <span class="stat-value" id="cpu-stat">---%</span>
-        </div>
-        <div class="stat-item">
-            <span class="stat-label">RAM:</span>
-            <span class="stat-value" id="ram-stat">---MB</span>
-        </div>
-    </div>
+    <!-- System Stats moved to Header -->
 
     <!-- Control Panel -->
     <div class="control-panel">
@@ -450,13 +489,10 @@
 
     <!-- Agent Chat -->
     <div class="chat-container">
-        <!-- Lisan al-Arab Scrolling Text - Two Parallel Strips -->
+        <!-- Lisan al-Arab Scrolling Text - Block System -->
         <div class="lisan-banners">
-            <div class="lisan-strip lisan-strip-arabic">
-                <span class="marquee-text marquee-arabic" id="lisan-arabic"></span>
-            </div>
-            <div class="lisan-strip lisan-strip-latin">
-                <span class="marquee-text marquee-latin" id="lisan-latin"></span>
+            <div id="lisan-marquee" class="lisan-marquee-container">
+                <!-- Word Blocks Injected Here -->
             </div>
         </div>
         <div class="agent-frame-wrapper">
@@ -494,7 +530,7 @@
     <script>
         const agentFrame = document.getElementById('agent-frame');
         const statusDot = document.getElementById('status-dot');
-        const statusText = document.getElementById('status-text');
+        // const statusText = document.getElementById('status-text'); // Removed
         const connLabel = document.getElementById('conn-label');
 
         // Use the server hostname instead of 127.0.0.1
@@ -510,13 +546,13 @@
             fetch(PROXY_URL, { mode: 'no-cors' })
                 .then(() => {
                     statusDot.classList.add('connected');
-                    statusText.textContent = 'ONLINE';
-                    connLabel.textContent = '● LIVE';
+                    connLabel.textContent = '●';
+                    connLabel.style.color = 'var(--accent-green)';
                 })
                 .catch(() => {
                     statusDot.classList.remove('connected');
-                    statusText.textContent = 'OFFLINE';
-                    connLabel.textContent = '○ DOWN';
+                    connLabel.textContent = '○';
+                    connLabel.style.color = 'var(--accent-red)';
                 });
         }
 
@@ -626,19 +662,34 @@
         // لِسَان العَرَب - Lisan al-Arab Streaming
         // ========================================
 
-        // Lisan al-Arab sentences (from lisanclean.json)
-        const lisanSentences = [
-            "البَرْقُ سَرِيعُ اللَّمْعِ وَالبَاطِنُ ظَاهِرٌ فِي كُلِّ شَيْءٍ",
-            "الأَدَبُ الَّذِي يَتَأَدَّبُ بِهِ الأَدِيبُ مِنَ النَّاسِ",
-            "المِفْتَاحُ آلَةُ الفَتْحِ وَالشَّمْسَةُ عَلَامَةُ السِّرِّيَّةِ",
-            "الإِنْتِشَارُ التَّفَرُّقُ وَالوَسْمُ أَثَرُ الكَيِّ",
-            "أَجَأ جَبَلٌ لِطَيِّىءٍ يُذَكَّرُ وَيُؤَنَّثُ",
-            "الأَبُّ الكَلَأُ وَالـمَرْعَى وَمَا تَعْتَلِفُهُ الـمَاشِيَةُ",
-            "غَلاَّبةٌ لِلنَّاجِياتِ الغُلْبِ حَتَّى أَتَى أُزْبِيُّها بِالأَدْبِ",
-            "الخَناذِيذُ رُؤُوسُ الجِبَالِ كَجِيدِ عَرُوسٍ مُتَبَذِّلَةٍ",
-            "نَحْنُ فِي الـمَشْتَاةِ نَدْعُو الجَفَلى لا تَرَى الآدِبَ فِينَا يَنْتَقِرُ",
-            "الإِرْبُ العُضْوُ الـمُوَفَّرُ الكَامِلُ الَّذِي لَمْ يَنقُصْ مِنْهُ شَيْءٌ"
+        // Lisan al-Arab sentences (Dynamic Fetch)
+        let lisanSentences = [
+            "بِسْمِ اللَّهِ الرَّحْمَٰنِ الرَّحِيمِ"
         ];
+
+        // Fetch Lisan data from server
+        async function fetchLisanData() {
+            try {
+                const response = await fetch('/api/lisan');
+                if (response.ok) {
+                    const data = await response.json();
+                    if (data && data.length > 0) {
+                        lisanSentences = data;
+                        currentLisanIndex = 0;
+                        updateLisanBanners();
+                        console.log('Lisan data loaded:', data.length);
+                    }
+                }
+            } catch (e) {
+                console.error('Failed to fetch Lisan data:', e);
+            }
+        }
+
+        // Initial Fetch
+        fetchLisanData();
+
+        // Refresh data every 60 seconds
+        setInterval(fetchLisanData, 60000);
 
         // Arabic consonants to Latin transliteration map
         const consonantMap = {
@@ -678,40 +729,35 @@
             return 'ًٌٍَُِّْ'.includes(char);
         }
 
-        // Transliterate full Arabic text with diacritics applied to Latin letters
-        function transliterateArabic(text) {
+        // Transliterate specific word
+        // Returns the Latin string with characters reversed for visual RTL alignment
+        function transliterateWord(word) {
             let result = '';
-            const chars = [...text];
+            const chars = [...word];
 
             for (let i = 0; i < chars.length; i++) {
                 const char = chars[i];
 
-                // Skip diacritics - they're handled with the previous consonant
                 if (isDiacritic(char)) continue;
 
-                // Spaces and punctuation
-                if (char === ' ' || char === '،' || char === '.') {
-                    result += char === '،' ? ',' : char;
-                    continue;
-                }
-
-                // Get the Latin consonant
-                let latin = consonantMap[char];
-                if (latin === undefined) {
-                    // Unknown character - keep as is
+                // Simple punctuation pass-through
+                if (',.،؟:;'.includes(char)) {
                     result += char;
                     continue;
                 }
 
-                // Look ahead for diacritics
+                let latin = consonantMap[char];
+                if (latin === undefined) {
+                    result += char;
+                    continue;
+                }
+
                 let j = i + 1;
                 while (j < chars.length && isDiacritic(chars[j])) {
                     const diac = chars[j];
                     if (diac === 'ّ') {
-                        // Shadda - double the consonant
                         latin = latin + latin;
                     } else if (diacriticMap[diac]) {
-                        // Append vowel after consonant
                         latin = latin + diacriticMap[diac];
                     }
                     j++;
@@ -719,72 +765,193 @@
 
                 result += latin;
             }
-            // Reverse word order AND letters within each word for RTL alignment
-            // Arabic (RTL): word1 word2 word3 (word1 on right)
-            // Latin (LTR) reversed: 3drow 2drow 1drow (1drow on right matches word1)
-            const words = result.split(' ').map(word => [...word].reverse().join(''));
-            return words.reverse().join(' ');
+            // Reverse the letters for RTL match ("salam" -> "malas")
+            return [...result].reverse().join('');
         }
 
         // Current sentence index
         let currentLisanIndex = 0;
 
-        // Update Lisan al-Arab banners with two parallel strips
-        function updateLisanBanners() {
-            const arabicEl = document.getElementById('lisan-arabic');
-            const latinEl = document.getElementById('lisan-latin');
-            if (!arabicEl || !latinEl) return;
+        // Create a DOM element for a word block
+        function createWordBlock(arabic, latin) {
+            const block = document.createElement('div');
+            block.className = 'word-block';
+            // Mark as content block for width calculation if needed
+            block.dataset.type = 'word';
+
+            const arSpan = document.createElement('div');
+            arSpan.className = 'word-arabic';
+            arSpan.textContent = arabic;
+
+            const laSpan = document.createElement('div');
+            laSpan.className = 'word-latin';
+            laSpan.textContent = latin;
+
+            block.appendChild(arSpan);
+            block.appendChild(laSpan);
+            return block;
+        }
+
+        function createSeparator() {
+            const sep = document.createElement('div');
+            sep.className = 'lisan-separator';
+            sep.dataset.type = 'separator';
+            sep.textContent = '◆';
+            return sep;
+        }
+
+        // State for Endless Stream
+        const marqueeContainer = document.getElementById('lisan-marquee');
+        // Force LTR for physics control, blocks keep internal alignment
+        if (marqueeContainer) marqueeContainer.style.direction = 'ltr';
+
+        // Start scroll at negative buffer so we have room to drive right
+        // Actually, we can start at 0 and prepend.
+        let currentScroll = 0;
+        const SCROLL_SPEED = 32; // px per second
+        let lastTime = performance.now();
+        let isInitialized = false;
+
+        // Create a fragment of a sentence
+        function createSentenceFragment(sentence) {
+            const words = sentence.split(' ').reverse();
+            const fragment = document.createDocumentFragment();
+
+            // Add Separator
+            fragment.appendChild(createSeparator());
+
+            words.forEach(word => {
+                if (!word.trim()) return;
+                const latin = transliterateWord(word);
+                fragment.appendChild(createWordBlock(word, latin));
+            });
+            return fragment;
+        }
+
+        // Add to the Left (Start) - Logic for L->R stream source
+        function prependNextSentence() {
+            if (!lisanSentences.length) return;
 
             const sentence = lisanSentences[currentLisanIndex];
-            const transliterated = transliterateArabic(sentence);
+            const fragment = createSentenceFragment(sentence);
 
-            // Build the text with diamond separators for continuous loop
-            const diamond = ' ◆ ';
-            arabicEl.textContent = sentence + diamond + sentence + diamond + sentence + diamond;
-            latinEl.textContent = transliterated + diamond + transliterated + diamond + transliterated + diamond;
+            // Measure width precisely using BoundingRect
+            const oldRect = marqueeContainer.getBoundingClientRect();
+            const oldWidth = oldRect.width;
 
-            // Cycle to next sentence
+            const firstChild = marqueeContainer.firstChild;
+            if (firstChild) {
+                marqueeContainer.insertBefore(fragment, firstChild);
+            } else {
+                marqueeContainer.appendChild(fragment);
+            }
+
+            // Immediate check of new width
+            const newRect = marqueeContainer.getBoundingClientRect();
+            const newWidth = newRect.width;
+            const addedWidth = newWidth - oldWidth;
+
+            // Adjust scroll with sub-pixel precision
+            currentScroll -= addedWidth;
+
+            // Cycle Index
             currentLisanIndex = (currentLisanIndex + 1) % lisanSentences.length;
         }
 
-        // Initialize Lisan banners
-        updateLisanBanners();
+        // Main Animation Loop
+        function animateStream(currentTime) {
+            if (!marqueeContainer) return;
 
-        // Synchronized pixel-speed animation for both strips
-        let scrollPosition = 0;
-        const SCROLL_SPEED = 30; // pixels per second (slower = more readable)
-        let lastTime = performance.now();
-
-        function animateMarquee(currentTime) {
             const deltaTime = (currentTime - lastTime) / 1000;
+            const dt = Math.min(deltaTime, 0.1);
             lastTime = currentTime;
 
-            scrollPosition += SCROLL_SPEED * deltaTime;
+            // Move Right
+            currentScroll += SCROLL_SPEED * dt;
 
-            const arabicEl = document.getElementById('lisan-arabic');
-            const latinEl = document.getElementById('lisan-latin');
-            const container = document.querySelector('.lisan-banners');
-
-            if (arabicEl && latinEl && container) {
-                const containerWidth = container.offsetWidth;
-                const arabicWidth = arabicEl.offsetWidth;
-
-                // Reset when fully scrolled
-                if (scrollPosition > arabicWidth + containerWidth) {
-                    scrollPosition = 0;
-                    updateLisanBanners();
-                }
-
-                // Apply same transform to both strips (both move left-to-right together)
-                arabicEl.style.transform = `translateX(${scrollPosition}px)`;
-                latinEl.style.transform = `translateX(${scrollPosition}px)`;
+            // 1. Check if we need to fill the LEFT side (Source)
+            // If currentScroll > -Buffer, we are running out of content on the left.
+            // (Since we want content at negative coordinates flowing in)
+            if (currentScroll > -200) {
+                prependNextSentence();
             }
 
-            requestAnimationFrame(animateMarquee);
+            // 2. Cleanup RIGHT side (Exit)
+            // Get parent viewport width
+            const viewportWidth = marqueeContainer.parentElement.offsetWidth;
+            const lastChild = marqueeContainer.lastElementChild;
+
+            if (lastChild) {
+                // Determine if lastChild is fully off-screen to the right
+                // Element visual Left = (ContainerVisualLeft + ElementOffsetLeft)
+                // ContainerVisualLeft = currentScroll.
+                // But let's use performant relative check.
+                // lastChild.offsetLeft is relative to container start.
+
+                const visualLeft = lastChild.offsetLeft + currentScroll;
+
+                if (visualLeft > viewportWidth) {
+                    marqueeContainer.removeChild(lastChild);
+                }
+            }
+
+            // Apply Transform
+            marqueeContainer.style.transform = `translate3d(${currentScroll}px, 0, 0)`; // use 3d for GPU
+
+            requestAnimationFrame(animateStream);
         }
 
-        // Start animation
-        requestAnimationFrame(animateMarquee);
+        // Initialize
+        function initStream() {
+            if (isInitialized) return;
+            isInitialized = true;
+
+            // Fill initially to cover screen + left buffer
+            // We want enough content on the LEFT so that currentScroll can be e.g. -2000
+            // and we still see content at 0.
+
+            // Build up content until width > viewport * 2
+            while (marqueeContainer.getBoundingClientRect().width < window.innerWidth * 2) {
+                prependNextSentence();
+            }
+
+            // Set start position:
+            // We want the stream to be visible, filling the screen.
+            // visual connection: aligns the "Rightmost" part of our negative-space content to the right edge of screen?
+            // "Left to Right" stream means content enters Left, moves Right.
+            // So we want to populate the Left off-screen area.
+            // Let's set currentScroll such that the RIGHT END of the content is at the RIGHT EDGE of viewport?
+            // Or just ensure we have content covering 0..Viewport.
+            // Since we `prepend`, the "End" of the DOM (lastChild) is the First thing we added.
+            // The "Start" of the DOM (firstChild) is the Last thing we added (Newest).
+            // We want the content to flow from Left.
+            // So we need content at Negative visual space.
+            // Container 0..2000.
+            // If currentScroll = -2000. Visual range is -2000..0. Screen is empty (all left).
+            // If currentScroll = -1500. Visual range -1500..500.
+            // We see content from offset 1500 to 2000 (roughly).
+            // This is the "Oldest" content (First added).
+            // As currentScroll increases (-1499...), content moves Right.
+            // Correct.
+
+            // So initialize currentScroll to: -ContainerWidth + ViewportWidth?
+            // Or just -ContainerWidth to start filling from emptiness?
+            // Use -ContainerWidth + ViewportWidth to fill screen immediately.
+
+            const width = marqueeContainer.getBoundingClientRect().width;
+            currentScroll = -width + window.innerWidth;
+
+            requestAnimationFrame(animateStream);
+        }
+
+        // Trigger
+        function updateLisanBanners() {
+            if (!isInitialized && lisanSentences.length > 0) {
+                initStream();
+            }
+        }
+
+        updateLisanBanners();
     </script>
 </body>
 
