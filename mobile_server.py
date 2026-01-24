@@ -175,12 +175,17 @@ class MobileHandler(http.server.SimpleHTTPRequestHandler):
                 self.wfile.write(json.dumps(response).encode())
                 return
             
-            # Start the IDE
+            # Start the IDE with proper display environment
+            env = os.environ.copy()
+            env['DISPLAY'] = ':0'
+            env['XDG_RUNTIME_DIR'] = f'/run/user/{os.getuid()}'
+            
             subprocess.Popen(
-                ['/usr/share/antigravity/antigravity', '--no-sandbox'],
+                ['/usr/bin/antigravity', '--no-sandbox'],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
-                start_new_session=True
+                start_new_session=True,
+                env=env
             )
             
             self.send_response(200)
