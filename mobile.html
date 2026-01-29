@@ -545,6 +545,22 @@
         </button>
     </div>
 
+    <!-- Model Selector -->
+    <div class="control-panel" style="padding-top: 0;">
+        <button class="control-btn btn-model" onclick="setModel(0, 'Flash')"
+            style="background: rgba(20,50,20,0.5); border: 1px solid rgba(34,170,34,0.4);">
+            ⚡ Flash
+        </button>
+        <button class="control-btn btn-model" onclick="setModel(1, 'Pro')"
+            style="background: rgba(30,60,30,0.5); border: 1px solid rgba(34,170,34,0.5);">
+            🧠 Pro
+        </button>
+        <button class="control-btn btn-model" onclick="setModel(2, 'Pro High')"
+            style="background: rgba(40,70,40,0.5); border: 1px solid rgba(34,170,34,0.6);">
+            🚀 Pro High
+        </button>
+    </div>
+
     <!-- Agent Chat -->
     <div class="chat-container">
         <!-- Lisan al-Arab Scrolling Text - Block System -->
@@ -701,6 +717,26 @@
                 }
             } catch (e) {
                 showToast('STOP SIGNAL SENT');
+            }
+        }
+
+        // Set LLM Model
+        async function setModel(index, name) {
+            showToast(`SWITCHING TO ${name.toUpperCase()}...`);
+            try {
+                const response = await fetch('/api/set-model', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ index, name })
+                });
+                if (response.ok) {
+                    showToast(`MODEL: ${name.toUpperCase()}`);
+                    setTimeout(() => refreshFrame(), 1000);
+                } else {
+                    showToast('MODEL SWITCH FAIL');
+                }
+            } catch (e) {
+                showToast('MODEL SIGNAL SENT');
             }
         }
 

@@ -120,6 +120,8 @@ class MobileHandler(http.server.SimpleHTTPRequestHandler):
             return self.handle_agent_mode()
         elif parsed.path == '/api/stop':
             return self.handle_stop()
+        elif parsed.path == '/api/set-model':
+            return self.handle_set_model()
         
         self.send_error(404, 'Not Found')
     
@@ -280,6 +282,62 @@ class MobileHandler(http.server.SimpleHTTPRequestHandler):
                 'success': False,
                 'message': str(e)
             }
+            self.wfile.write(json.dumps(response).encode())
+    
+    def handle_set_model(self):
+        """Set LLM model via xdotool - uses keyboard to navigate model dropdown"""
+        print("[Mobile Server] Set Model requested")
+        
+        try:
+            import time
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length).decode('utf-8')
+            data = json.loads(body) if body else {}
+            model_index = data.get('index', 0)
+            model_name = data.get('name', 'Unknown')
+            
+            env = os.environ.copy()
+            env['DISPLAY'] = ':0'
+            
+            # Focus Antigravity window
+            subprocess.run(['wmctrl', '-a', 'Antigravity'], env=env, timeout=2, capture_output=True)
+            time.sleep(0.3)
+            
+            # Open chat panel first
+            subprocess.run(['xdotool', 'key', 'ctrl+e'], env=env, timeout=2)
+            time.sleep(0.5)
+            
+            # Click model dropdown - approximate position (150px from left, near bottom)
+            # Using Tab to navigate to model selector, then Space/Enter to open
+            for _ in range(3):  # Tab through elements to reach model dropdown
+                subprocess.run(['xdotool', 'key', 'Tab'], env=env, timeout=1)
+                time.sleep(0.1)
+            
+            subprocess.run(['xdotool', 'key', 'space'], env=env, timeout=1)  # Open dropdown
+            time.sleep(0.3)
+            
+            # Navigate to model by index
+            for _ in range(model_index):
+                subprocess.run(['xdotool', 'key', 'Down'], env=env, timeout=1)
+                time.sleep(0.1)
+            
+            subprocess.run(['xdotool', 'key', 'Return'], env=env, timeout=1)  # Select
+            
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            
+            response = {'success': True, 'message': f'Model {model_name} selected'}
+            self.wfile.write(json.dumps(response).encode())
+            
+        except Exception as e:
+            print(f"[Mobile Server] Set model error: {e}")
+            self.send_response(500)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            response = {'success': False, 'message': str(e)}
             self.wfile.write(json.dumps(response).encode())
     
     def handle_restart_ide(self):
