@@ -492,6 +492,53 @@
             margin: 0 15px;
         }
 
+        /* Model Popup Dropdown */
+        .model-popup {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.8);
+            z-index: 1000;
+            display: flex;
+            align-items: flex-start;
+            justify-content: center;
+            padding-top: 100px;
+        }
+
+        .model-popup-content {
+            background: var(--bg-secondary);
+            border: 1px solid var(--accent-green);
+            border-radius: 10px;
+            min-width: 280px;
+            max-width: 90%;
+            box-shadow: 0 0 20px rgba(50, 255, 50, 0.3);
+        }
+
+        .model-option {
+            padding: 14px 18px;
+            color: var(--accent-green);
+            font-size: 13px;
+            cursor: pointer;
+            border-bottom: 1px solid var(--border);
+            transition: background 0.2s;
+        }
+
+        .model-option:first-child {
+            border-radius: 10px 10px 0 0;
+        }
+
+        .model-option:last-child {
+            border-bottom: none;
+            border-radius: 0 0 10px 10px;
+        }
+
+        .model-option:hover,
+        .model-option:active {
+            background: rgba(50, 255, 50, 0.15);
+        }
+
         .collapsed {
             display: none !important;
         }
@@ -530,8 +577,8 @@
             <button class="control-btn btn-start" onclick="startIDE()">
                 IDE Start
             </button>
-            <button class="control-btn btn-kill" onclick="killIDE()">
-                Off
+            <button class="control-btn btn-kill" onclick="toggleModelPopup()">
+                ▾ Model
             </button>
         </div>
         <button class="control-btn btn-agent" onclick="openAgentMode()">
@@ -545,20 +592,20 @@
         </button>
     </div>
 
-    <!-- Model Selector -->
-    <div class="control-panel" style="padding-top: 0;">
-        <button class="control-btn btn-model" onclick="setModel(0, 'Flash')"
-            style="background: rgba(20,50,20,0.5); border: 1px solid rgba(34,170,34,0.4);">
-            ⚡ Flash
-        </button>
-        <button class="control-btn btn-model" onclick="setModel(1, 'Pro')"
-            style="background: rgba(30,60,30,0.5); border: 1px solid rgba(34,170,34,0.5);">
-            🧠 Pro
-        </button>
-        <button class="control-btn btn-model" onclick="setModel(2, 'Pro High')"
-            style="background: rgba(40,70,40,0.5); border: 1px solid rgba(34,170,34,0.6);">
-            🚀 Pro High
-        </button>
+    <!-- Model Popup Dropdown -->
+    <div id="model-popup" class="model-popup" style="display: none;">
+        <div class="model-popup-content">
+            <div class="model-option" onclick="selectModel(0, 'Gemini 3 Pro (High)')">Gemini 3 Pro (High)</div>
+            <div class="model-option" onclick="selectModel(1, 'Gemini 3 Pro (Low)')">Gemini 3 Pro (Low)</div>
+            <div class="model-option" onclick="selectModel(2, 'Gemini 3 Flash')">Gemini 3 Flash <span
+                    style="color:#0f0;font-size:8px">NEW</span></div>
+            <div class="model-option" onclick="selectModel(3, 'Claude Sonnet 4.5')">Claude Sonnet 4.5</div>
+            <div class="model-option" onclick="selectModel(4, 'Claude Sonnet 4.5 (Thinking)')">Claude Sonnet 4.5
+                (Thinking)</div>
+            <div class="model-option" onclick="selectModel(5, 'Claude Opus 4.5 (Thinking)')">Claude Opus 4.5 (Thinking)
+            </div>
+            <div class="model-option" onclick="selectModel(6, 'GPT-OSS 120B (Medium)')">GPT-OSS 120B (Medium)</div>
+        </div>
     </div>
 
     <!-- Agent Chat -->
@@ -720,9 +767,21 @@
             }
         }
 
-        // Set LLM Model
-        async function setModel(index, name) {
-            showToast(`SWITCHING TO ${name.toUpperCase()}...`);
+        // Model Popup Functions
+        function toggleModelPopup() {
+            const popup = document.getElementById('model-popup');
+            popup.style.display = popup.style.display === 'none' ? 'flex' : 'none';
+        }
+
+        function hideModelPopup() {
+            document.getElementById('model-popup').style.display = 'none';
+        }
+
+        // Select model and send to server
+        async function selectModel(index, name) {
+            hideModelPopup();
+            showToast(`SWITCHING TO ${name}...`);
+
             try {
                 const response = await fetch('/api/set-model', {
                     method: 'POST',
@@ -730,15 +789,23 @@
                     body: JSON.stringify({ index, name })
                 });
                 if (response.ok) {
-                    showToast(`MODEL: ${name.toUpperCase()}`);
-                    setTimeout(() => refreshFrame(), 1000);
+                    showToast(`✓ ${name}`);
+                    setTimeout(() => refreshFrame(), 500);
                 } else {
                     showToast('MODEL SWITCH FAIL');
                 }
             } catch (e) {
-                showToast('MODEL SIGNAL SENT');
+                showToast('SIGNAL SENT');
             }
         }
+
+        // Close popup on background click
+        document.addEventListener('click', function (e) {
+            const popup = document.getElementById('model-popup');
+            if (e.target === popup) {
+                hideModelPopup();
+            }
+        });
 
         // Show restart modal
         function showRestartModal() {

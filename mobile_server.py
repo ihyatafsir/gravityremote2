@@ -285,7 +285,7 @@ class MobileHandler(http.server.SimpleHTTPRequestHandler):
             self.wfile.write(json.dumps(response).encode())
     
     def handle_set_model(self):
-        """Set LLM model via xdotool - uses keyboard to navigate model dropdown"""
+        """Set LLM model via xdotool - uses mouse clicks to select model"""
         print("[Mobile Server] Set Model requested")
         
         try:
@@ -299,29 +299,55 @@ class MobileHandler(http.server.SimpleHTTPRequestHandler):
             env = os.environ.copy()
             env['DISPLAY'] = ':0'
             
-            # Focus Antigravity window
-            subprocess.run(['wmctrl', '-a', 'Antigravity'], env=env, timeout=2, capture_output=True)
+            # Get Antigravity window ID and geometry
+            result = subprocess.run(
+                ['xdotool', 'search', '--name', 'Antigravity'],
+                capture_output=True, text=True, env=env, timeout=3
+            )
+            window_ids = result.stdout.strip().split('\n')
+            if not window_ids or not window_ids[0]:
+                raise Exception("Antigravity window not found")
+            
+            window_id = window_ids[0]
+            
+            # Focus the window
+            subprocess.run(['xdotool', 'windowactivate', '--sync', window_id], env=env, timeout=3)
             time.sleep(0.3)
             
-            # Open chat panel first
-            subprocess.run(['xdotool', 'key', 'ctrl+e'], env=env, timeout=2)
+            # Get window geometry to calculate click positions
+            result = subprocess.run(
+                ['xdotool', 'getwindowgeometry', '--shell', window_id],
+                capture_output=True, text=True, env=env, timeout=3
+            )
+            
+            # Parse geometry (X, Y, WIDTH, HEIGHT)
+            geom = {}
+            for line in result.stdout.strip().split('\n'):
+                if '=' in line:
+                    k, v = line.split('=')
+                    geom[k] = int(v)
+            
+            # Model dropdown is approximately at:
+            # X: 150px from left of window
+            # Y: near bottom of window (window_height - 60)
+            click_x = geom.get('X', 0) + 150
+            click_y = geom.get('Y', 0) + geom.get('HEIGHT', 900) - 60
+            
+            print(f"[Mobile Server] Clicking model dropdown at ({click_x}, {click_y})")
+            
+            # Click to open model dropdown
+            subprocess.run(['xdotool', 'mousemove', str(click_x), str(click_y)], env=env, timeout=2)
+            subprocess.run(['xdotool', 'click', '1'], env=env, timeout=2)
             time.sleep(0.5)
             
-            # Click model dropdown - approximate position (150px from left, near bottom)
-            # Using Tab to navigate to model selector, then Space/Enter to open
-            for _ in range(3):  # Tab through elements to reach model dropdown
-                subprocess.run(['xdotool', 'key', 'Tab'], env=env, timeout=1)
-                time.sleep(0.1)
+            # Now click on the model option (each option is ~35px tall, menu opens upward)
+            # Index 0 is at the top of the popup
+            option_y = click_y - 50 - (model_index * 35)
             
-            subprocess.run(['xdotool', 'key', 'space'], env=env, timeout=1)  # Open dropdown
-            time.sleep(0.3)
+            print(f"[Mobile Server] Clicking model option at ({click_x}, {option_y})")
             
-            # Navigate to model by index
-            for _ in range(model_index):
-                subprocess.run(['xdotool', 'key', 'Down'], env=env, timeout=1)
-                time.sleep(0.1)
-            
-            subprocess.run(['xdotool', 'key', 'Return'], env=env, timeout=1)  # Select
+            subprocess.run(['xdotool', 'mousemove', str(click_x), str(option_y)], env=env, timeout=2)
+            subprocess.run(['xdotool', 'click', '1'], env=env, timeout=2)
             
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
