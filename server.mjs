@@ -242,6 +242,17 @@ function run(cmd) {
     });
 }
 
+// POST /messages/stop
+app.post('/messages/stop', async (req, res) => {
+    try {
+        const result = await cdpBridge.stopAgent();
+        broadcast('agent_state', { busy: false }); // Force idle update immediately
+        res.json(result);
+    } catch (e) {
+        res.json({ ok: false, error: e.message });
+    }
+});
+
 // GET /api/stats
 app.get('/api/stats', async (req, res) => {
     try {
@@ -504,6 +515,12 @@ async function main() {
     // Start CDP Bridge
     console.log('[CDP] Starting Bridge...');
     cdpBridge.start();
+
+    // Start Polling for State Sync
+    // (Wait 5s for connection stability)
+    setTimeout(() => {
+        cdpBridge.startPolling((event, payload) => broadcast(event, payload));
+    }, 5000);
 
     server.listen(PORT, () => {
         const ips = getLocalIPs();

@@ -328,6 +328,65 @@ export class CdpBridge {
         return { ok: false, error: 'not_found' };
     }
 
+    // Stop the Agent (Click Cancel)
+    async stopAgent() {
+        const script = `(() => {
+            const cancel = document.querySelector('[data-tooltip-id="input-send-button-cancel-tooltip"]');
+            if (cancel) {
+                cancel.click();
+                return { ok: true };
+            }
+            return { ok: false, error: 'not_found' };
+        })()`;
+
+        const contextIds = [...this.contexts.keys()];
+        for (const contextId of contextIds.reverse()) {
+            try {
+                const res = await this.send('Runtime.evaluate', {
+                    expression: script,
+                    contextId,
+                    returnByValue: true
+                });
+                if (res.result?.value?.ok) return { ok: true };
+            } catch (e) { }
+        }
+        return { ok: false };
+    }
+
+    // Polling Loop for State Sync
+    startPolling(broadcastFn) {
+        setInterval(async () => {
+            if (!this.isConnected) return;
+
+            // Check busy state
+            const script = `(() => {
+                const cancel = document.querySelector('[data-tooltip-id="input-send-button-cancel-tooltip"]');
+                return !!(cancel && cancel.offsetParent !== null);
+             })()`;
+
+            let isBusy = false;
+            const contextIds = [...this.contexts.keys()];
+            for (const contextId of contextIds.reverse()) {
+                try {
+                    const res = await this.send('Runtime.evaluate', {
+                        expression: script,
+                        contextId,
+                        returnByValue: true
+                    });
+                    if (res.result && res.result.value === true) {
+                        isBusy = true;
+                        break;
+                    }
+                } catch (e) { }
+            }
+
+            if (isBusy !== this.lastBusyState) {
+                this.lastBusyState = isBusy;
+                broadcastFn('agent_state', { busy: isBusy });
+            }
+        }, 1000);
+    }
+
     // Observer for new messages
     // We inject a MutationObserver into the IDE context
     async startObserver() {
