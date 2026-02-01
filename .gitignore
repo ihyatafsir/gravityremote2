@@ -1,0 +1,7 @@
+node_modules
+server.log
+mcp.log
+*.log
+.DS_Store
+brain/
+state.json

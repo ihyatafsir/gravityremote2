@@ -1,0 +1,778 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>GravityRemote Mobile</title>
+    <link rel="stylesheet" href="mobile.css">
+</head>
+
+<body>
+
+    <!-- Header -->
+    <header class="header">
+        <div class="brand" id="brand-toggle" onclick="toggleHeaders()">◆ GRAVITYREMOTE</div>
+        <div class="header-right">
+            <!-- CPU/RAM Compact -->
+            <div class="stat-compact">
+                <span class="stat-label-tiny">CPU</span>
+                <span class="stat-val-tiny" id="cpu-stat">--%</span>
+            </div>
+            <div class="stat-compact">
+                <span class="stat-label-tiny">RAM</span>
+                <span class="stat-val-tiny" id="ram-stat">--MB</span>
+            </div>
+
+            <span class="agent-badge">Agent</span>
+            <span id="conn-label" class="live-badge">●</span>
+            <div class="status-badge">
+                <div id="status-dot" class="status-dot"></div>
+            </div>
+        </div>
+    </header>
+
+    <!-- System Stats moved to Header -->
+
+    <!-- Control Panel -->
+    <!-- Control Panel -->
+    <div class="control-panel">
+        <div class="btn-group">
+            <button class="control-btn btn-start" onclick="startIDE()">
+                IDE Start
+            </button>
+            <button class="control-btn btn-kill" onclick="toggleModelPopup()">
+                ▾ Model
+            </button>
+        </div>
+        <button class="control-btn btn-agent" onclick="toggleHistory()">
+            📚 History
+        </button>
+        <button class="control-btn btn-agent" onclick="openAgentMode()">
+            ⌨ AGENT
+        </button>
+        <button class="control-btn btn-restart" onclick="showRestartModal()">
+            ⟳ Reload
+        </button>
+        <button class="control-btn btn-refresh" onclick="refreshFrame()">
+            ↻ Refresh
+        </button>
+        <button class="control-btn btn-files" onclick="triggerUpload()">
+            📎 Attach
+        </button>
+    </div>
+
+    <input type="file" id="upload-input" style="display: none;">
+
+    <!-- History Drawer (Left) -->
+    <div id="history-drawer" class="model-popup" style="display: none; justify-content: flex-start;">
+        <div class="model-popup-content"
+            style="height: 100vh; width: 80%; max-width: 300px; border-radius: 0 10px 10px 0; border-left: none;">
+            <div class="header"
+                style="background: transparent; border: none; padding: 15px; display: flex; justify-content: space-between; align-items: center;">
+                <div class="brand">📚 Chat History</div>
+                <div class="control-btn" onclick="startNewChat()"
+                    style="width: auto; padding: 5px 10px; font-size: 12px; background: #007fd4;">+ New</div>
+                <div class="control-btn btn-stop" onclick="toggleHistory()" style="width: 30px; padding: 5px;">✕</div>
+            </div>
+            <div id="history-list" style="overflow-y: auto; height: calc(100% - 60px);">
+                <!-- Items injected here -->
+                <div class="model-option" style="color: #666; text-align: center;">Loading...</div>
+            </div>
+        </div>
+    </div>
+
+
+    <!-- Model Popup Dropdown -->
+    <div id="model-popup" class="model-popup" style="display: none;">
+        <div class="model-popup-content">
+            <div class="model-option" onclick="selectModel(0, 'Gemini 3 Pro (High)')">Gemini 3 Pro (High)</div>
+            <div class="model-option" onclick="selectModel(1, 'Gemini 3 Pro (Low)')">Gemini 3 Pro (Low)</div>
+            <div class="model-option" onclick="selectModel(2, 'Gemini 3 Flash')">Gemini 3 Flash <span
+                    style="color:#0f0;font-size:8px">NEW</span></div>
+            <div class="model-option" onclick="selectModel(3, 'Claude Sonnet 4.5')">Claude Sonnet 4.5</div>
+            <div class="model-option" onclick="selectModel(4, 'Claude Sonnet 4.5 (Thinking)')">Claude Sonnet 4.5
+                (Thinking)</div>
+            <div class="model-option" onclick="selectModel(5, 'Claude Opus 4.5 (Thinking)')">Claude Opus 4.5 (Thinking)
+            </div>
+            <div class="model-option" onclick="selectModel(6, 'GPT-OSS 120B (Medium)')">GPT-OSS 120B (Medium)</div>
+        </div>
+    </div>
+
+    <!-- Agent Chat -->
+    <div class="chat-container">
+        <!-- Lisan al-Arab Scrolling Text - Block System -->
+        <div class="lisan-banners" id="lisanBanners">
+            <div id="lisan-marquee" class="lisan-marquee-container">
+            </div>
+        </div>
+        <div class="agent-frame-wrapper">
+            <iframe id="agent-frame" src="" allow="clipboard-read; clipboard-write"></iframe>
+        </div>
+    </div>
+
+    <!-- Footer -->
+    <div class="footer">
+        Mobile Remote v2.0 (Bridge) • Port 8787 • Dark Mode
+    </div>
+
+    <!-- Restart Modal -->
+    <div id="restart-modal" class="modal-overlay">
+        <div class="modal">
+            <div class="modal-title">⟳ Restart Antigravity IDE</div>
+            <div class="modal-text">
+                This will restart the Antigravity IDE process. The connection may be temporarily interrupted.
+                <br><br>
+                Are you sure you want to continue?
+            </div>
+            <div class="modal-actions">
+                <button class="modal-cancel" onclick="hideRestartModal()">Cancel</button>
+                <button class="modal-confirm" onclick="restartIDE()">
+                    <span id="restart-spinner" class="spinner"></span>
+                    <span id="restart-text">Restart</span>
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast -->
+    <div id="toast" class="toast"></div>
+
+    <script>
+        const agentFrame = document.getElementById('agent-frame');
+        const statusDot = document.getElementById('status-dot');
+        // const statusText = document.getElementById('status-text'); // Removed
+        const connLabel = document.getElementById('conn-label');
+
+        // Use the server hostname instead of 127.0.0.1
+        // Use the same host and port as the mobile server
+        // Use the same host and port as the mobile server
+        const CHAT_URL = 'chat.html';
+
+        // Set iframe source on load
+        agentFrame.src = CHAT_URL;
+
+        // Check connection status (keep checking 8892 if still needed for health)
+        // Check connection status via the local proxy
+        function checkConnection() {
+            fetch('/health')
+                .then(() => {
+                    statusDot.classList.add('connected');
+                    connLabel.textContent = '●';
+                    connLabel.style.color = 'var(--accent-green)';
+                })
+                .catch(() => {
+                    statusDot.classList.remove('connected');
+                    connLabel.textContent = '○';
+                    connLabel.style.color = 'var(--accent-red)';
+                });
+        }
+
+        // Fetch and display system stats (80s style)
+        async function updateSystemStats() {
+            try {
+                const response = await fetch('/api/stats');
+                if (response.ok) {
+                    const stats = await response.json();
+                    document.getElementById('cpu-stat').textContent = stats.cpu + '%';
+                    document.getElementById('ram-stat').textContent = stats.ram + 'MB';
+                }
+            } catch (e) {
+                document.getElementById('cpu-stat').textContent = 'ERR';
+                document.getElementById('ram-stat').textContent = 'ERR';
+            }
+        }
+
+        // Refresh the agent frame
+        function refreshFrame() {
+            agentFrame.src = CHAT_URL;
+            showToast('REFRESHING...');
+        }
+
+        // Start IDE (when not running)
+        async function startIDE() {
+            showToast('STARTING IDE...');
+            try {
+                const response = await fetch('/api/start-ide', { method: 'POST' });
+                if (response.ok) {
+                    showToast('IDE STARTING');
+                    setTimeout(() => {
+                        agentFrame.src = CHAT_URL;
+                    }, 3000);
+                } else {
+                    showToast('START FAIL');
+                }
+            } catch (e) {
+                showToast('START SIGNAL SENT');
+                setTimeout(() => {
+                    agentFrame.src = CHAT_URL;
+                }, 3000);
+            }
+        }
+
+        // Kill IDE (kill all antigravity processes)
+        async function killIDE() {
+            showToast('KILLING IDE...');
+            try {
+                const response = await fetch('/api/kill-ide', { method: 'POST' });
+                if (response.ok) {
+                    showToast('IDE KILLED');
+                } else {
+                    showToast('KILL FAIL');
+                }
+            } catch (e) {
+                showToast('KILL SIGNAL SENT');
+            }
+        }
+
+        // Open Agent Mode (send Ctrl+E to IDE)
+        async function openAgentMode() {
+            showToast('ACTIVATING AGENT...');
+            try {
+                const response = await fetch('/api/agent-mode', { method: 'POST' });
+                if (response.ok) {
+                    showToast('AGENT MODE ON');
+                    setTimeout(() => {
+                        agentFrame.src = CHAT_URL;
+                    }, 1000);
+                } else {
+                    showToast('AGENT FAIL');
+                }
+            } catch (e) {
+                showToast('SIGNAL SENT');
+            }
+        }
+
+        // Stop Agent operation
+        async function stopAgent() {
+            showToast('STOPPING...');
+            try {
+                const response = await fetch('/api/stop', { method: 'POST' });
+                if (response.ok) {
+                    showToast('STOPPED');
+                } else {
+                    showToast('STOP FAIL');
+                }
+            } catch (e) {
+                showToast('STOP SIGNAL SENT');
+            }
+        }
+
+        // Model Popup Functions
+        function toggleModelPopup() {
+            const popup = document.getElementById('model-popup');
+            popup.style.display = popup.style.display === 'none' ? 'flex' : 'none';
+        }
+
+        function hideModelPopup() {
+            document.getElementById('model-popup').style.display = 'none';
+        }
+
+        // History Functions
+        // History Functions
+        async function toggleHistory() {
+            const drawer = document.getElementById('history-drawer');
+            const list = document.getElementById('history-list');
+
+            if (drawer.style.display === 'none') {
+                drawer.style.display = 'flex';
+                // Fetch History
+                try {
+                    const res = await fetch('/api/history');
+                    const data = await res.json();
+
+                    if (data.ok && data.history) {
+                        list.innerHTML = '';
+                        if (data.history.length === 0) {
+                            list.innerHTML = '<div class="model-option">No history found</div>';
+                        }
+                        data.history.forEach(item => {
+                            const div = document.createElement('div');
+                            div.className = 'history-item';
+                            if (item.active) div.classList.add('active'); // active logic
+
+                            // Format timestamp
+                            let timeStr = '';
+                            if (item.timestamp) {
+                                const date = new Date(item.timestamp);
+                                timeStr = `<span style="font-size:0.75em; opacity:0.5; float:right;">${date.toLocaleDateString()}</span>`;
+                            }
+
+                            div.innerHTML = `<div class="truncate" style="font-weight:500;">${item.title}</div>${timeStr}`;
+                            div.onclick = () => loadHistoryItem(item.id, item.index, item.title);
+                            list.appendChild(div);
+                        });
+                    } else {
+                        list.innerHTML = '<div class="model-option">Error loading history</div>';
+                    }
+                } catch (e) {
+                    list.innerHTML = '<div class="model-option">Connection Error</div>';
+                }
+
+            } else {
+                drawer.style.display = 'none';
+            }
+        }
+
+        async function loadHistoryItem(id, index, title) {
+            document.getElementById('history-drawer').style.display = 'none';
+            showToast(`Opening: ${title.substring(0, 15)}...`);
+
+            const payload = {};
+            if (id) payload.id = id;
+            if (index !== undefined) payload.index = index;
+
+            await fetch('/api/history/load', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+            // We don't refresh frame here because we are just opening a file in IDE
+            // But we might want to refresh to see if context changed? 
+            // For now, just toast.
+            showToast('OPENED ✓');
+        }
+
+        async function startNewChat() {
+            if (!confirm('Clear current chat and start new?')) return;
+            document.getElementById('history-drawer').style.display = 'none';
+            try {
+                await fetch('/api/history/new', { method: 'POST' });
+                showToast('NEW CHAT ✓');
+            } catch (e) {
+                showToast('ERROR');
+            }
+        }
+
+        // Select model and send to server
+        async function selectModel(index, name) {
+            hideModelPopup();
+            showToast(`SWITCHING TO ${name}...`);
+
+            try {
+                const response = await fetch('/api/set-model', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ index, name })
+                });
+                if (response.ok) {
+                    showToast(`✓ ${name}`);
+                    setTimeout(() => refreshFrame(), 500);
+                } else {
+                    showToast('MODEL SWITCH FAIL');
+                }
+            } catch (e) {
+                showToast('SIGNAL SENT');
+            }
+        }
+
+        // Close popup on background click
+        document.addEventListener('click', function (e) {
+            const popup = document.getElementById('model-popup');
+            const historyDrawer = document.getElementById('history-drawer');
+            if (e.target === popup) {
+                hideModelPopup();
+            }
+            if (e.target === historyDrawer) {
+                toggleHistory();
+            }
+        });
+
+        // Show restart modal
+        function showRestartModal() {
+            document.getElementById('restart-modal').classList.add('active');
+        }
+
+        // Hide restart modal
+        function hideRestartModal() {
+            document.getElementById('restart-modal').classList.remove('active');
+        }
+
+        // Restart IDE
+        async function restartIDE() {
+            const spinner = document.getElementById('restart-spinner');
+            const text = document.getElementById('restart-text');
+            const btn = document.querySelector('.modal-confirm');
+
+            btn.disabled = true;
+            spinner.classList.add('active');
+            text.textContent = 'RESTARTING...';
+
+            try {
+                const response = await fetch('/api/restart-ide', { method: 'POST' });
+                if (response.ok) {
+                    showToast('IDE RESTART OK');
+                    setTimeout(() => {
+                        window.location.reload();
+                    }, 5000);
+                } else {
+                    showToast('RESTART FAIL');
+                    btn.disabled = false;
+                    spinner.classList.remove('active');
+                    text.textContent = 'Restart';
+                }
+            } catch (e) {
+                showToast('SIGNAL SENT');
+                setTimeout(() => {
+                    window.location.reload();
+                }, 5000);
+            }
+        }
+
+        // Show toast message
+        function showToast(message) {
+            const toast = document.getElementById('toast');
+            toast.textContent = message;
+            toast.classList.add('show');
+            setTimeout(() => toast.classList.remove('show'), 3000);
+        }
+
+        // Toggle headers visibility
+        let headersCollapsed = false;
+        function toggleHeaders() {
+            headersCollapsed = !headersCollapsed;
+            const header = document.querySelector('.header');
+            const controlPanel = document.querySelector('.control-panel');
+            const lisanBanners = document.querySelector('.lisan-banners');
+
+            if (header) header.classList.toggle('collapsed', headersCollapsed);
+            if (controlPanel) controlPanel.classList.toggle('collapsed', headersCollapsed);
+            if (lisanBanners) lisanBanners.classList.toggle('collapsed', headersCollapsed);
+        }
+
+        // Initialize
+        checkConnection();
+        updateSystemStats();
+        setInterval(checkConnection, 10000);
+        setInterval(updateSystemStats, 3000);
+
+        // Upload Logic
+        const uploadInput = document.getElementById('upload-input');
+        function triggerUpload() {
+            uploadInput.click();
+        }
+
+        uploadInput.addEventListener('change', async () => {
+            if (uploadInput.files.length === 0) return;
+            const file = uploadInput.files[0];
+            const formData = new FormData();
+            formData.append('file', file);
+
+            showToast('UPLOADING...');
+            try {
+                const res = await fetch('/api/upload', { method: 'POST', body: formData });
+                const data = await res.json();
+                if (data.ok) {
+                    showToast('UPLOADED ✓');
+                } else {
+                    showToast('UPLOAD FAIL');
+                }
+            } catch (e) {
+                showToast('UPLOAD ERROR');
+            }
+            uploadInput.value = ''; // Reset
+        });
+
+        // ========================================
+        // لِسَان العَرَب - Lisan al-Arab Streaming
+        // ========================================
+
+        // Lisan al-Arab sentences (Dynamic Fetch)
+        let lisanSentences = [
+            "بِسْمِ اللَّهِ الرَّحْمَٰنِ الرَّحِيمِ",
+            "اقْرَأْ بِاسْمِ رَبِّكَ الَّذِي خَلَقَ",
+            "خَلَقَ الْإِنسَانَ مِنْ عَلَقٍ",
+            "اقْرَأْ وَرَبُّكَ الْأَكْرَمُ",
+            "الَّذِي عَلَّمَ بِالْقَلَمِ",
+            "عَلَّمَ الْإِنسَانَ مَا لَمْ يَعْلَمْ"
+        ];
+
+        // Fetch Lisan data from server
+        async function fetchLisanData() {
+            try {
+                const response = await fetch('/api/lisan');
+                if (response.ok) {
+                    const data = await response.json();
+                    if (data && data.length > 0) {
+                        lisanSentences = data;
+                        currentLisanIndex = 0;
+                        updateLisanBanners();
+                        console.log('Lisan data loaded:', data.length);
+                    }
+                }
+            } catch (e) {
+                console.error('Failed to fetch Lisan data:', e);
+            }
+        }
+
+        // Initial Fetch
+        fetchLisanData();
+
+        // Refresh data every 60 seconds
+        setInterval(fetchLisanData, 60000);
+
+        // Arabic consonants to Latin transliteration map
+        const consonantMap = {
+            'ا': 'ā', 'أ': 'a', 'إ': 'i', 'آ': 'ā',
+            'ب': 'b', 'ت': 't', 'ث': 'th',
+            'ج': 'j', 'ح': 'ḥ', 'خ': 'kh',
+            'د': 'd', 'ذ': 'dh',
+            'ر': 'r', 'ز': 'z',
+            'س': 's', 'ش': 'sh',
+            'ص': 'ṣ', 'ض': 'ḍ',
+            'ط': 'ṭ', 'ظ': 'ẓ',
+            'ع': 'ʿ', 'غ': 'gh',
+            'ف': 'f', 'ق': 'q',
+            'ك': 'k', 'ل': 'l',
+            'م': 'm', 'ن': 'n',
+            'ه': 'h', 'و': 'w',
+            'ي': 'y', 'ى': 'ā',
+            'ء': 'ʾ', 'ة': 'h',
+            'ـ': '', // Tatweel (kashida)
+        };
+
+        // Arabic diacritics mapped to Unicode combining diacritics for Latin
+        // These go ABOVE the previous Latin letter
+        const diacriticMap = {
+            'َ': 'a',   // Fatha → a
+            'ِ': 'i',   // Kasra → i
+            'ُ': 'u',   // Damma → u
+            'ً': 'an',  // Fathatan → an
+            'ٍ': 'in',  // Kasratan → in
+            'ٌ': 'un',  // Dammatan → un
+            'ْ': '',    // Sukun → nothing
+            'ّ': '',    // Shadda → handled separately (double consonant)
+        };
+
+        // Check if character is an Arabic diacritic
+        function isDiacritic(char) {
+            return 'ًٌٍَُِّْ'.includes(char);
+        }
+
+        // Transliterate specific word
+        // Returns the Latin string with characters reversed for visual RTL alignment
+        function transliterateWord(word) {
+            let result = '';
+            const chars = [...word];
+
+            for (let i = 0; i < chars.length; i++) {
+                const char = chars[i];
+
+                if (isDiacritic(char)) continue;
+
+                // Simple punctuation pass-through
+                if (',.،؟:;'.includes(char)) {
+                    result += char;
+                    continue;
+                }
+
+                let latin = consonantMap[char];
+                if (latin === undefined) {
+                    result += char;
+                    continue;
+                }
+
+                let j = i + 1;
+                while (j < chars.length && isDiacritic(chars[j])) {
+                    const diac = chars[j];
+                    if (diac === 'ّ') {
+                        latin = latin + latin;
+                    } else if (diacriticMap[diac]) {
+                        latin = latin + diacriticMap[diac];
+                    }
+                    j++;
+                }
+
+                result += latin;
+            }
+            // Reverse the letters for RTL match ("salam" -> "malas")
+            return [...result].reverse().join('');
+        }
+
+        // Current sentence index
+        let currentLisanIndex = 0;
+
+        // Create a DOM element for a word block
+        function createWordBlock(arabic, latin) {
+            const block = document.createElement('div');
+            block.className = 'word-block';
+            // Mark as content block for width calculation if needed
+            block.dataset.type = 'word';
+
+            const arSpan = document.createElement('div');
+            arSpan.className = 'word-arabic';
+            arSpan.textContent = arabic;
+
+            const laSpan = document.createElement('div');
+            laSpan.className = 'word-latin';
+            laSpan.textContent = latin;
+
+            block.appendChild(arSpan);
+            block.appendChild(laSpan);
+            return block;
+        }
+
+        function createSeparator() {
+            const sep = document.createElement('div');
+            sep.className = 'lisan-separator';
+            sep.dataset.type = 'separator';
+            sep.textContent = '◆';
+            return sep;
+        }
+
+        // State for Endless Stream
+        const marqueeContainer = document.getElementById('lisan-marquee');
+        // Force LTR for physics control, blocks keep internal alignment
+        if (marqueeContainer) marqueeContainer.style.direction = 'ltr';
+
+        // Start scroll at negative buffer so we have room to drive right
+        // Actually, we can start at 0 and prepend.
+        let currentScroll = 0;
+        const SCROLL_SPEED = 32; // px per second
+        let lastTime = performance.now();
+        let isInitialized = false;
+
+        // Create a fragment of a sentence
+        function createSentenceFragment(sentence) {
+            const words = sentence.split(' ').reverse();
+            const fragment = document.createDocumentFragment();
+
+            // Add Separator
+            fragment.appendChild(createSeparator());
+
+            words.forEach(word => {
+                if (!word.trim()) return;
+                const latin = transliterateWord(word);
+                fragment.appendChild(createWordBlock(word, latin));
+            });
+            return fragment;
+        }
+
+        // Add to the Left (Start) - Logic for L->R stream source
+        function prependNextSentence() {
+            if (!lisanSentences.length) return;
+
+            const sentence = lisanSentences[currentLisanIndex];
+            const fragment = createSentenceFragment(sentence);
+
+            // Measure width precisely using BoundingRect
+            const oldRect = marqueeContainer.getBoundingClientRect();
+            const oldWidth = oldRect.width;
+
+            const firstChild = marqueeContainer.firstChild;
+            if (firstChild) {
+                marqueeContainer.insertBefore(fragment, firstChild);
+            } else {
+                marqueeContainer.appendChild(fragment);
+            }
+
+            // Immediate check of new width
+            const newRect = marqueeContainer.getBoundingClientRect();
+            const newWidth = newRect.width;
+            const addedWidth = newWidth - oldWidth;
+
+            // Adjust scroll with sub-pixel precision
+            currentScroll -= addedWidth;
+
+            // Cycle Index
+            currentLisanIndex = (currentLisanIndex + 1) % lisanSentences.length;
+        }
+
+        // Main Animation Loop
+        function animateStream(currentTime) {
+            if (!marqueeContainer) return;
+
+            const deltaTime = (currentTime - lastTime) / 1000;
+            const dt = Math.min(deltaTime, 0.1);
+            lastTime = currentTime;
+
+            // Move Right
+            currentScroll += SCROLL_SPEED * dt;
+
+            // 1. Check if we need to fill the LEFT side (Source)
+            // If currentScroll > -Buffer, we are running out of content on the left.
+            // (Since we want content at negative coordinates flowing in)
+            if (currentScroll > -200) {
+                prependNextSentence();
+            }
+
+            // 2. Cleanup RIGHT side (Exit)
+            // Get parent viewport width
+            const viewportWidth = marqueeContainer.parentElement.offsetWidth;
+            const lastChild = marqueeContainer.lastElementChild;
+
+            if (lastChild) {
+                // Determine if lastChild is fully off-screen to the right
+                // Element visual Left = (ContainerVisualLeft + ElementOffsetLeft)
+                // ContainerVisualLeft = currentScroll.
+                // But let's use performant relative check.
+                // lastChild.offsetLeft is relative to container start.
+
+                const visualLeft = lastChild.offsetLeft + currentScroll;
+
+                if (visualLeft > viewportWidth) {
+                    marqueeContainer.removeChild(lastChild);
+                }
+            }
+
+            // Apply Transform
+            marqueeContainer.style.transform = `translate3d(${currentScroll}px, 0, 0)`; // use 3d for GPU
+
+            requestAnimationFrame(animateStream);
+        }
+
+        // Initialize
+        function initStream() {
+            if (isInitialized) return;
+            isInitialized = true;
+
+            // Fill initially to cover screen + left buffer
+            // We want enough content on the LEFT so that currentScroll can be e.g. -2000
+            // and we still see content at 0.
+
+            // Build up content until width > viewport * 2
+            while (marqueeContainer.getBoundingClientRect().width < window.innerWidth * 2) {
+                prependNextSentence();
+            }
+
+            // Set start position:
+            // We want the stream to be visible, filling the screen.
+            // visual connection: aligns the "Rightmost" part of our negative-space content to the right edge of screen?
+            // "Left to Right" stream means content enters Left, moves Right.
+            // So we want to populate the Left off-screen area.
+            // Let's set currentScroll such that the RIGHT END of the content is at the RIGHT EDGE of viewport?
+            // Or just ensure we have content covering 0..Viewport.
+            // Since we `prepend`, the "End" of the DOM (lastChild) is the First thing we added.
+            // The "Start" of the DOM (firstChild) is the Last thing we added (Newest).
+            // We want the content to flow from Left.
+            // So we need content at Negative visual space.
+            // Container 0..2000.
+            // If currentScroll = -2000. Visual range is -2000..0. Screen is empty (all left).
+            // If currentScroll = -1500. Visual range -1500..500.
+            // We see content from offset 1500 to 2000 (roughly).
+            // This is the "Oldest" content (First added).
+            // As currentScroll increases (-1499...), content moves Right.
+            // Correct.
+
+            // So initialize currentScroll to: -ContainerWidth + ViewportWidth?
+            // Or just -ContainerWidth to start filling from emptiness?
+            // Use -ContainerWidth + ViewportWidth to fill screen immediately.
+
+            const width = marqueeContainer.getBoundingClientRect().width;
+            currentScroll = -width + window.innerWidth;
+
+            requestAnimationFrame(animateStream);
+        }
+
+        // Trigger
+        function updateLisanBanners() {
+            if (!isInitialized && lisanSentences.length > 0) {
+                initStream();
+            }
+        }
+
+        updateLisanBanners();
+    </script>
+</body>
+
+</html>

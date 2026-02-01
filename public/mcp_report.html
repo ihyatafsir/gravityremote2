@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MCP Server Report</title>
+    <style>
+        body {
+            font-family: sans-serif;
+            background: #111;
+            color: #eee;
+            padding: 20px;
+        }
+
+        h1 {
+            color: #00ff00;
+        }
+
+        .card {
+            background: #222;
+            padding: 15px;
+            margin-bottom: 15px;
+            border-radius: 8px;
+            border: 1px solid #333;
+        }
+
+        .status-ok {
+            color: #0f0;
+        }
+
+        .status-err {
+            color: #f00;
+        }
+
+        pre {
+            background: #000;
+            padding: 10px;
+            overflow-x: auto;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        td,
+        th {
+            padding: 8px;
+            text-align: left;
+            border-bottom: 1px solid #444;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>AG Bridge (MCP Server) Report</h1>
+
+    <div class="card">
+        <h2>System Status</h2>
+        <div id="loading">Loading...</div>
+        <div id="content" style="display:none">
+            <p><strong>Agent Mode:</strong> <span id="agent-state"></span></p>
+            <p><strong>CDP Connection:</strong> <span id="cdp-status"></span></p>
+            <p><strong>Pending Messages:</strong> <span id="pending-count"></span></p>
+            <p><strong>Memory:</strong> <span id="mem-usage"></span></p>
+            <p><strong>CPU:</strong> <span id="cpu-usage"></span></p>
+        </div>
+    </div>
+
+    <div class="card">
+        <h2>Recent History (Filesystem)</h2>
+        <ul id="history-list"></ul>
+    </div>
+
+    <script>
+        async function load() {
+            try {
+                // Fetch Status
+                const statusRes = await fetch('/status');
+                const status = await statusRes.json();
+
+                document.getElementById('agent-state').textContent = status.agent?.state || 'Unknown';
+                const cdpSpan = document.getElementById('cdp-status');
+                cdpSpan.textContent = status.cdp ? 'CONNECTED' : 'DISCONNECTED';
+                cdpSpan.className = status.cdp ? 'status-ok' : 'status-err';
+                document.getElementById('pending-count').textContent = status.pendingMessages || 0;
+
+                // Fetch Stats
+                const statsRes = await fetch('/api/stats');
+                const stats = await statsRes.json();
+                document.getElementById('mem-usage').textContent = stats.memory || 'N/A';
+                document.getElementById('cpu-usage').textContent = stats.cpu || 'N/A';
+
+                // Fetch History
+                const histRes = await fetch('/api/history');
+                const hist = await histRes.json();
+                const list = document.getElementById('history-list');
+                if (hist.ok && hist.history) {
+                    hist.history.slice(0, 10).forEach(item => {
+                        const li = document.createElement('li');
+                        li.textContent = `${item.title} (${new Date(item.timestamp).toLocaleDateString()})`;
+                        list.appendChild(li);
+                    });
+                }
+
+                document.getElementById('loading').style.display = 'none';
+                document.getElementById('content').style.display = 'block';
+
+            } catch (e) {
+                document.getElementById('loading').textContent = 'Error loading report: ' + e.message;
+            }
+        }
+        load();
+    </script>
+</body>
+
+</html>
