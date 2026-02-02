@@ -44,7 +44,8 @@ const wss = new WebSocketServer({ noServer: true });
 // --- State ---
 let STATE = {
     messages: [],
-    agent: { state: 'idle', lastSeen: null, task: '' }
+    agent: { state: 'idle', lastSeen: null, task: '', busy: false },
+    actionQueue: [] // Async Action Queue
 };
 
 async function loadState() {
@@ -53,8 +54,10 @@ async function loadState() {
         const raw = await readFile(STATE_FILE, 'utf-8');
         const data = JSON.parse(raw);
         if (Array.isArray(data.messages)) STATE.messages = data.messages;
-        if (data.agent) STATE.agent = data.agent;
-        console.log(`[PERSIST] State loaded. ${STATE.messages.length} messages.`);
+        if (Array.isArray(data.messages)) STATE.messages = data.messages;
+        if (data.agent) STATE.agent = { ...STATE.agent, ...data.agent };
+        if (Array.isArray(data.actionQueue)) STATE.actionQueue = data.actionQueue;
+        console.log(`[PERSIST] State loaded. ${STATE.messages.length} msgs, ${STATE.actionQueue.length} queued.`);
     } catch (err) {
         if (err.code === 'ENOENT') {
             console.log('[PERSIST]', 'No state file found. Starting fresh.');
@@ -212,10 +215,89 @@ app.post('/agent/heartbeat', (req, res) => {
 
     saveState();
     broadcast('agent_heartbeat', STATE.agent);
+    saveState();
+    broadcast('agent_heartbeat', STATE.agent);
     res.json({ ok: true });
 });
 
-// --- Control API Helpers ---
+// --- Async Queue Processor ---
+setInterval(async () => {
+    // If we have actions and agent is NOT busy
+    if (STATE.actionQueue.length > 0 && !STATE.agent.busy) {
+        const action = STATE.actionQueue[0];
+        console.log(`[QUEUE] Processing action from ${action.from}: "${action.text.substring(0, 20)}..."`);
+
+        try {
+            // Verify BUSY state one last time via CDP live check
+            // (Agent heartbeat might be slightly stale)
+            const injection = await cdpBridge.injectMessage(action.text);
+
+            if (injection.ok) {
+                console.log('[QUEUE] Success! Removing from queue.');
+                STATE.actionQueue.shift();
+                saveState();
+                broadcast('queue_update', { count: STATE.actionQueue.length, lastAction: 'success' });
+            } else if (injection.error === 'busy') {
+                console.log('[QUEUE] CDP reported BUSY. Retrying later.');
+                // Update state to match reality
+                STATE.agent.busy = true;
+                broadcast('agent_state', { busy: true });
+            } else {
+                console.log('[QUEUE] Injection failed (non-busy). dropping.', injection.error);
+                // Drop it to avoid infinite block? Or retry? 
+                // For now, drop after 3 failures? We'll just drop for safety.
+                STATE.actionQueue.shift();
+                saveState();
+            }
+        } catch (e) {
+            console.error('[QUEUE] Error processing:', e);
+        }
+    }
+}, 2000); // Check every 2 seconds
+
+// --- Tab & Queue API ---
+
+// POST /api/queue
+app.post('/api/queue', (req, res) => {
+    const { text, from } = req.body;
+    if (!text) return res.json({ ok: false, error: 'missing_text' });
+
+    STATE.actionQueue.push({
+        id: Date.now().toString(),
+        text,
+        from: from || 'api',
+        addedAt: new Date().toISOString()
+    });
+    saveState();
+
+    console.log(`[QUEUE] Added action. Size: ${STATE.actionQueue.length}`);
+    broadcast('queue_update', { count: STATE.actionQueue.length });
+    res.json({ ok: true, position: STATE.actionQueue.length });
+});
+
+// GET /api/tabs
+app.get('/api/tabs', async (req, res) => {
+    try {
+        const result = await cdpBridge.getTabs();
+        res.json(result);
+    } catch (e) {
+        res.json({ ok: false, error: e.message });
+    }
+});
+
+// POST /api/tabs/focus
+app.post('/api/tabs/focus', async (req, res) => {
+    const { name } = req.body;
+    if (!name) return res.json({ ok: false, error: 'missing_name' });
+
+    try {
+        const result = await cdpBridge.focusTab(name);
+        res.json(result);
+    } catch (e) {
+        res.json({ ok: false, error: e.message });
+    }
+});
+
 
 // Load Lisan
 let LISAN_CORPUS = [];
@@ -330,13 +412,49 @@ app.post('/api/stop', async (req, res) => {
     }
 });
 
+// POST /api/new-chat
+app.post('/api/new-chat', async (req, res) => {
+    console.log('[API] New Chat requested');
+    try {
+        // Ctrl(2) + l
+        const result = await cdpBridge.triggerShortcut(2, 'l', 'KeyL', 76, 38);
+        console.log('[API] New Chat Result:', result);
+        res.json({ success: result.ok, error: result.error });
+    } catch (e) {
+        console.error('[API] New Chat Error:', e);
+        res.json({ success: false, error: e.message });
+    }
+});
+
 // POST /api/set-model
 app.post('/api/set-model', async (req, res) => {
+    console.log('[API] Set Model requested', req.body);
+    const { index } = req.body;
+    const targetIndex = parseInt(index) || 0;
+
     try {
-        await run("xdotool key ctrl+shift+m");
-        res.json({ success: true });
+        // 1. Open Menu: Ctrl(2) + Shift(8) = 10 + m
+        await cdpBridge.triggerShortcut(10, 'M', 'KeyM', 77, 50);
+
+        // 2. Wait for menu
+        await new Promise(r => setTimeout(r, 300));
+
+        // 3. Arrow Down 'index' times
+        for (let i = 0; i < targetIndex; i++) {
+            // ArrowDown (0 modifiers)
+            await cdpBridge.triggerShortcut(0, 'ArrowDown', 'ArrowDown', 40, 116);
+            await new Promise(r => setTimeout(r, 50));
+        }
+
+        // 4. Select: Enter
+        await new Promise(r => setTimeout(r, 100));
+        await cdpBridge.triggerShortcut(0, 'Enter', 'Enter', 13, 36);
+
+        console.log(`[API] Set Model: Selected index ${targetIndex}`);
+        res.json({ success: true, index: targetIndex });
     } catch (e) {
-        res.json({ success: false });
+        console.error('[API] Set Model Error:', e);
+        res.json({ success: false, error: e.message });
     }
 });
 

@@ -111,6 +111,33 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                     required: ['id'],
                 },
             },
+            {
+                name: 'ide_queue_write',
+                description: 'Queue text to be written to the IDE when it becomes idle. Use this to avoid "Busy" errors.',
+                inputSchema: {
+                    type: 'object',
+                    properties: {
+                        text: { type: 'string', description: 'The text to queue' }
+                    },
+                    required: ['text']
+                }
+            },
+            {
+                name: 'get_ide_tabs',
+                description: 'Get a list of open tabs in the IDE to see what agents/files are active.',
+                inputSchema: { type: 'object', properties: {} }
+            },
+            {
+                name: 'focus_tab',
+                description: 'Switch the active tab in the IDE by name.',
+                inputSchema: {
+                    type: 'object',
+                    properties: {
+                        name: { type: 'string', description: 'Name or partial name of the tab to focus' }
+                    },
+                    required: ['name']
+                }
+            },
         ],
     };
 });
@@ -188,6 +215,43 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                     return { content: [{ type: 'text', text: `Message ${id} marked as ${status}` }] };
                 } else {
                     return { content: [{ type: 'text', text: `Error: ${result.error}` }], isError: true };
+                }
+            }
+
+            case 'ide_queue_write': {
+                const text = args?.text;
+                if (!text) return { content: [{ type: 'text', text: 'Error: text is required' }], isError: true };
+
+                const result = await bridgeRequest('POST', '/api/queue', { text, from: 'agent_mcp_queue' });
+
+                if (result.ok) {
+                    return { content: [{ type: 'text', text: `Action queued! Position: ${result.position}` }] };
+                } else {
+                    return { content: [{ type: 'text', text: `Failed to queue: ${result.error}` }], isError: true };
+                }
+            }
+
+            case 'get_ide_tabs': {
+                const result = await bridgeRequest('GET', '/api/tabs');
+
+                if (result.ok && result.tabs) {
+                    const tabList = result.tabs.map(t => `- [${t.index}] ${t.name} ${t.active ? '(ACTIVE)' : ''}`).join('\n');
+                    return { content: [{ type: 'text', text: `Open Tabs:\n${tabList}` }] };
+                } else {
+                    return { content: [{ type: 'text', text: `Failed to get tabs: ${result.error || 'Unknown error'}` }], isError: true };
+                }
+            }
+
+            case 'focus_tab': {
+                const name = args?.name;
+                if (!name) return { content: [{ type: 'text', text: 'Error: name is required' }], isError: true };
+
+                const result = await bridgeRequest('POST', '/api/tabs/focus', { name });
+
+                if (result.ok) {
+                    return { content: [{ type: 'text', text: `Success! Switched to tab: ${result.target}` }] };
+                } else {
+                    return { content: [{ type: 'text', text: `Failed to switch tab: ${result.error}` }], isError: true };
                 }
             }
 

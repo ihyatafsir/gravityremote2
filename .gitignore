@@ -5,3 +5,9 @@ mcp.log
 .DS_Store
 brain/
 state.json
+__pycache__/
+old/
+old_archives/
+public/*.apk
+public/*.mp3
+public/*.json
