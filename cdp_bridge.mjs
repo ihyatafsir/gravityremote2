@@ -389,8 +389,35 @@ export class CdpBridge {
 
     // Observer for new messages
     // We inject a MutationObserver into the IDE context
+    // Observer for new messages
+    // We inject a MutationObserver into the IDE context
     async startObserver() {
         if (!this.isConnected) return;
+
+        // Ensure we only have one console listener
+        if (!this._consoleListenerBound) {
+            this.send('Runtime.enable'); // Ensure enabled
+            this.ws.on('message', (raw) => {
+                try {
+                    const msg = JSON.parse(raw);
+                    if (msg.method === 'Runtime.consoleAPICalled') {
+                        const args = msg.params.args;
+                        if (args && args[0] && args[0].value && typeof args[0].value === 'string') {
+                            const text = args[0].value;
+                            if (text.startsWith('__AG_MSG__:')) {
+                                const payload = JSON.parse(text.substring(11));
+                                if (this.onNewMessage) this.onNewMessage(payload);
+                            }
+                            // Also log observer heartbeat
+                            if (text.startsWith('__AG_OBSERVER_ACTIVE__')) {
+                                // log('Observer active in context');
+                            }
+                        }
+                    }
+                } catch (e) { }
+            });
+            this._consoleListenerBound = true;
+        }
 
         const contextIds = [...this.contexts.keys()].reverse();
         for (const contextId of contextIds) {
@@ -399,35 +426,28 @@ export class CdpBridge {
                 // Just inject logic
                 await this.send('Runtime.evaluate', {
                     expression: `(() => {
-                        if (window._agObserver) return;
+                        // Re-inject if missing or stale
+                        if (window._agObserver && document.body.contains(window._agObserverTarget)) return;
                         
                         window._agMessagesSeen = new Set();
-                        
-                        // Find a stable container. Usually the list of items.
-                        // We'll observe document body or strict selector if known.
-                        // VS Code chat list is usually dynamic.
+                        window._agObserverTarget = document.body;
                         
                         const observer = new MutationObserver((mutations) => {
-                             // Find new messages
-                             const items = [...document.querySelectorAll('.monaco-list-row, .chat-message-item, [role="listitem"]')];
-                             const newMessages = [];
+                             // Find new messages - expanded selectors
+                             const items = [...document.querySelectorAll('.monaco-list-row, .chat-message-item, [role="listitem"], .msg-content')];
                              
                              items.forEach(el => {
-                                 // Basic heuristic: check if it has text
                                  const text = el.innerText;
                                  if (!text || text.length < 2) return;
                                  
-                                 // Generate simple hash or ID
                                  const hash = text.substring(0, 50) + text.length;
                                  
                                  if (!window._agMessagesSeen.has(hash)) {
                                      window._agMessagesSeen.add(hash);
                                      
-                                     // Determine Sender
                                      const isUser = el.className.includes('user') || el.innerText.startsWith('You');
                                      const from = isUser ? 'user' : 'agent';
                                      
-                                     // Send to bridge (console.log special format)
                                      console.log('__AG_MSG__:' + JSON.stringify({ from, text }));
                                  }
                              });
@@ -435,33 +455,12 @@ export class CdpBridge {
                         
                         observer.observe(document.body, { childList: true, subtree: true });
                         window._agObserver = observer;
-                        console.log('AG Observer Started');
+                        console.log('__AG_OBSERVER_ACTIVE__');
                     })()`,
                     contextId
                 });
             } catch (e) { }
         }
-
-        // Listen for console logs
-        this.send('Runtime.enable'); // Ensure enabled
-        this.ws.on('message', (raw) => {
-            try {
-                const msg = JSON.parse(raw);
-                if (msg.method === 'Runtime.consoleAPICalled') {
-                    const args = msg.params.args;
-                    if (args && args[0] && args[0].value && typeof args[0].value === 'string') {
-                        const text = args[0].value;
-                        if (text.startsWith('__AG_MSG__:')) {
-                            const payload = JSON.parse(text.substring(11));
-                            // Emit to formatting
-                            // We need access to the WS broadcasting function.
-                            // We'll emit an event or call a callback.
-                            if (this.onNewMessage) this.onNewMessage(payload);
-                        }
-                    }
-                }
-            } catch (e) { }
-        });
     }
 
     async getDOM(selector = 'body') {
@@ -583,6 +582,134 @@ export class CdpBridge {
             }
         }
         return { ok: false, error: 'input_not_found' };
+    }
+
+    async triggerShortcut(modifiers, key, code, windowsVirtualKeyCode, nativeVirtualKeyCode) {
+        if (!this.isConnected) return { ok: false, error: 'not_connected' };
+
+        // We target the page directly via Input domain, usually doesn't need contextId if focused,
+        // but let's try to focus the main page first just in case.
+
+        try {
+            // Modifiers: 1=Alt, 2=Ctrl, 4=Meta/Command, 8=Shift
+            // cdp expects "modifiers" bitmask
+
+            // RawKeyDown
+            await this.send('Input.dispatchKeyEvent', {
+                type: 'rawKeyDown',
+                modifiers,
+                key, // e.g. "l" or "M"
+                code, // e.g. "KeyL"
+                windowsVirtualKeyCode,
+                nativeVirtualKeyCode
+            });
+
+            // KeyUp
+            await this.send('Input.dispatchKeyEvent', {
+                type: 'keyUp',
+                modifiers,
+                key,
+                code,
+                windowsVirtualKeyCode,
+                nativeVirtualKeyCode
+            });
+
+            return { ok: true };
+        } catch (e) {
+            return { ok: false, error: e.message };
+        }
+    }
+
+    // --- Tab Management ---
+
+    async getTabs() {
+        if (!this.isConnected) return { ok: false, error: 'not_connected' };
+
+        // We'll iterate contexts to find the one with the tab bar
+        const contextIds = [...this.contexts.keys()].reverse();
+
+        // Script to scrape tabs
+        const script = `(() => {
+            // VS Code tabs usually have class 'tab' and contain 'tab-label'
+            // We'll look for both standard and specific selectors
+            const tabs = [...document.querySelectorAll('.tab')];
+            if (tabs.length === 0) return null;
+
+            return tabs.map((t, idx) => {
+                const label = t.querySelector('.tab-label, .monaco-icon-label-container');
+                const name = label ? label.innerText : t.innerText;
+                const active = t.classList.contains('active');
+                return { index: idx, name: name.trim(), active };
+            }).filter(t => t.name.length > 0);
+        })()`;
+
+        for (const contextId of contextIds) {
+            try {
+                const res = await this.send('Runtime.evaluate', {
+                    expression: script,
+                    contextId,
+                    returnByValue: true
+                });
+
+                if (res.result?.value) {
+                    // Found a context that returned tabs
+                    return { ok: true, tabs: res.result.value, contextId };
+                }
+            } catch (e) { }
+        }
+
+        return { ok: false, error: 'tabs_not_found' };
+    }
+
+    async focusTab(nameOrIndex) {
+        if (!this.isConnected) return { ok: false, error: 'not_connected' };
+
+        // 1. Get current tabs to find the target
+        const tabRes = await this.getTabs();
+        if (!tabRes.ok || !tabRes.tabs) return { ok: false, error: 'tabs_not_found_for_focus' };
+
+        const { tabs, contextId } = tabRes;
+        let targetIdx = -1;
+
+        if (typeof nameOrIndex === 'number') {
+            targetIdx = nameOrIndex;
+        } else {
+            // Find by partial name match (case insensitive)
+            const lowerQuery = String(nameOrIndex).toLowerCase();
+            targetIdx = tabs.findIndex(t => t.name.toLowerCase().includes(lowerQuery));
+        }
+
+        if (targetIdx === -1) return { ok: false, error: 'tab_not_found' };
+
+        // 2. Click the tab in the SAME context where we found it
+        const script = `(() => {
+            const tabs = [...document.querySelectorAll('.tab')];
+            const target = tabs[${targetIdx}];
+            if (target) {
+                // Try multiple click methods
+                target.click();
+                target.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+                target.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+                return { ok: true, name: target.innerText };
+            }
+            return { ok: false, error: 'dom_element_missing' };
+        })()`;
+
+        try {
+            const clickRes = await this.send('Runtime.evaluate', {
+                expression: script,
+                contextId, // Use the context where we found the tabs
+                returnByValue: true
+            });
+
+            if (clickRes.result?.value?.ok) {
+                return { ok: true, target: tabs[targetIdx].name };
+            }
+        } catch (e) {
+            return { ok: false, error: e.message };
+        }
+
+        return { ok: false, error: 'click_failed' };
     }
 }
 

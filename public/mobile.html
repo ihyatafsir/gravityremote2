@@ -44,6 +44,9 @@
             <button class="control-btn btn-kill" onclick="toggleModelPopup()">
                 ▾ Model
             </button>
+            <button class="control-btn" style="background:var(--accent-blue)" onclick="startNewChat()">
+                + Chat
+            </button>
         </div>
         <button class="control-btn btn-agent" onclick="toggleHistory()">
             📚 History
@@ -137,6 +140,22 @@
 
     <!-- Toast -->
     <div id="toast" class="toast"></div>
+
+    <!-- سند (Sanad) Outbox Notification Banner -->
+    <div id="outbox-banner" class="outbox-banner" style="display: none;" onclick="toggleOutbox()">
+        <span id="outbox-count">0</span> new messages from Agent 📬
+    </div>
+
+    <!-- Outbox Panel -->
+    <div id="outbox-panel" class="outbox-panel" style="display: none;">
+        <div class="outbox-header">
+            <span>📬 Agent Messages (سند)</span>
+            <button onclick="toggleOutbox()" class="outbox-close">✕</button>
+        </div>
+        <div id="outbox-messages" class="outbox-messages">
+            <!-- Messages injected here -->
+        </div>
+    </div>
 
     <script>
         const agentFrame = document.getElementById('agent-frame');
@@ -337,7 +356,8 @@
             if (!confirm('Clear current chat and start new?')) return;
             document.getElementById('history-drawer').style.display = 'none';
             try {
-                await fetch('/api/history/new', { method: 'POST' });
+                // Changed to /api/new-chat for CDP shortcut
+                await fetch('/api/new-chat', { method: 'POST' });
                 showToast('NEW CHAT ✓');
             } catch (e) {
                 showToast('ERROR');
@@ -445,6 +465,68 @@
         updateSystemStats();
         setInterval(checkConnection, 10000);
         setInterval(updateSystemStats, 3000);
+
+        // ========================================
+        // سند (Sanad) - Outbox Polling
+        // ========================================
+        let outboxOpen = false;
+
+        async function pollOutbox() {
+            try {
+                const res = await fetch('/api/outbox?delivered=false');
+                if (res.ok) {
+                    const data = await res.json();
+                    const count = data.count || 0;
+                    const banner = document.getElementById('outbox-banner');
+                    const countSpan = document.getElementById('outbox-count');
+
+                    if (count > 0) {
+                        banner.style.display = 'block';
+                        countSpan.textContent = count;
+
+                        // Update panel if open
+                        if (outboxOpen) {
+                            renderOutboxMessages(data.replies);
+                        }
+                    } else {
+                        banner.style.display = 'none';
+                    }
+                }
+            } catch (e) {
+                console.error('Outbox poll error:', e);
+            }
+        }
+
+        function toggleOutbox() {
+            outboxOpen = !outboxOpen;
+            const panel = document.getElementById('outbox-panel');
+            panel.style.display = outboxOpen ? 'block' : 'none';
+            if (outboxOpen) pollOutbox();
+        }
+
+        function renderOutboxMessages(messages) {
+            const container = document.getElementById('outbox-messages');
+            container.innerHTML = messages.map(m => `
+                <div class="outbox-msg" onclick="ackOutbox('${m.id}')">
+                    <div class="outbox-msg-text">${m.text.replace(/\n/g, '<br>')}</div>
+                    <div class="outbox-msg-time">${new Date(m.createdAt).toLocaleTimeString()}</div>
+                </div>
+            `).join('');
+        }
+
+        async function ackOutbox(id) {
+            try {
+                await fetch(`/api/outbox/${id}/ack`, { method: 'POST' });
+                showToast('Marked as read ✓');
+                pollOutbox(); // Refresh
+            } catch (e) {
+                showToast('ACK failed');
+            }
+        }
+
+        // Start outbox polling
+        pollOutbox();
+        setInterval(pollOutbox, 5000); // Poll every 5 seconds
 
         // Upload Logic
         const uploadInput = document.getElementById('upload-input');

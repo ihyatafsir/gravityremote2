@@ -41,10 +41,13 @@ const app = express();
 const server = createServer(app);
 const wss = new WebSocketServer({ noServer: true });
 
-// --- State ---
+// --- State (with سند - persistent outbox for agent replies) ---
 let STATE = {
     messages: [],
-    agent: { state: 'idle', lastSeen: null, task: '' }
+    agent: { state: 'idle', lastSeen: null, task: '', busy: false },
+    actionQueue: [], // Async Action Queue
+    delegations: [],  // Agent Delegation Tasks
+    outbox: []       // سند (Sanad) - Persistent outbox for agent replies when MCP is down
 };
 
 async function loadState() {
@@ -53,8 +56,12 @@ async function loadState() {
         const raw = await readFile(STATE_FILE, 'utf-8');
         const data = JSON.parse(raw);
         if (Array.isArray(data.messages)) STATE.messages = data.messages;
-        if (data.agent) STATE.agent = data.agent;
-        console.log(`[PERSIST] State loaded. ${STATE.messages.length} messages.`);
+        if (Array.isArray(data.messages)) STATE.messages = data.messages;
+        if (data.agent) STATE.agent = { ...STATE.agent, ...data.agent };
+        if (Array.isArray(data.actionQueue)) STATE.actionQueue = data.actionQueue;
+        if (Array.isArray(data.delegations)) STATE.delegations = data.delegations;
+        if (Array.isArray(data.outbox)) STATE.outbox = data.outbox;
+        console.log(`[PERSIST] State loaded. ${STATE.messages.length} msgs, ${STATE.actionQueue.length} queued, ${STATE.delegations.length} delegations, ${STATE.outbox.length} outbox.`);
     } catch (err) {
         if (err.code === 'ENOENT') {
             console.log('[PERSIST]', 'No state file found. Starting fresh.');
@@ -188,6 +195,65 @@ app.post('/messages/:id/ack', (req, res) => {
     res.json({ ok: true, message: msg });
 });
 
+// ============================================================================
+// سند (Sanad) - Persistent Outbox for Agent Replies (HTTP Fallback)
+// When MCP is down, agent replies are stored here and can be polled by mobile
+// ============================================================================
+
+// POST /api/outbox - Agent adds a reply to the outbox (for mobile to poll)
+app.post('/api/outbox', (req, res) => {
+    const { text, priority } = req.body;
+    if (!text) return res.status(400).json({ ok: false, error: 'text_required' });
+
+    const reply = {
+        id: 'out_' + Date.now().toString(36) + Math.random().toString(36).substr(2, 5),
+        createdAt: new Date().toISOString(),
+        text,
+        priority: priority || 'normal',
+        delivered: false
+    };
+
+    STATE.outbox.push(reply);
+    if (STATE.outbox.length > 100) STATE.outbox.shift(); // Keep last 100
+    saveState();
+
+    broadcast('outbox_new', reply);
+    console.log(`[SANAD] Agent reply queued: ${text.substring(0, 50)}...`);
+    res.json({ ok: true, reply });
+});
+
+// GET /api/outbox - Mobile polls for agent replies
+app.get('/api/outbox', (req, res) => {
+    const { delivered, limit } = req.query;
+    let items = STATE.outbox;
+
+    // Filter by delivery status
+    if (delivered === 'false') {
+        items = items.filter(r => !r.delivered);
+    } else if (delivered === 'true') {
+        items = items.filter(r => r.delivered);
+    }
+
+    // Limit results
+    const maxItems = parseInt(limit) || 50;
+    items = items.slice(-maxItems);
+
+    res.json({ ok: true, replies: items, count: items.length });
+});
+
+// POST /api/outbox/:id/ack - Mobile acknowledges receipt
+app.post('/api/outbox/:id/ack', (req, res) => {
+    const { id } = req.params;
+    const reply = STATE.outbox.find(r => r.id === id);
+    if (!reply) return res.status(404).json({ ok: false, error: 'not_found' });
+
+    reply.delivered = true;
+    reply.deliveredAt = new Date().toISOString();
+    saveState();
+
+    broadcast('outbox_ack', reply);
+    res.json({ ok: true, reply });
+});
 
 // GET /status
 app.get('/status', (req, res) => {
@@ -212,10 +278,279 @@ app.post('/agent/heartbeat', (req, res) => {
 
     saveState();
     broadcast('agent_heartbeat', STATE.agent);
+    saveState();
+    broadcast('agent_heartbeat', STATE.agent);
     res.json({ ok: true });
 });
 
-// --- Control API Helpers ---
+// --- Async Queue Processor ---
+setInterval(async () => {
+    // If we have actions and agent is NOT busy
+    if (STATE.actionQueue.length > 0 && !STATE.agent.busy) {
+        const action = STATE.actionQueue[0];
+        console.log(`[QUEUE] Processing action from ${action.from}: "${action.text.substring(0, 20)}..."`);
+
+        try {
+            // Verify BUSY state one last time via CDP live check
+            // (Agent heartbeat might be slightly stale)
+            const injection = await cdpBridge.injectMessage(action.text);
+
+            if (injection.ok) {
+                console.log('[QUEUE] Success! Removing from queue.');
+                STATE.actionQueue.shift();
+                saveState();
+                broadcast('queue_update', { count: STATE.actionQueue.length, lastAction: 'success' });
+            } else if (injection.error === 'busy') {
+                console.log('[QUEUE] CDP reported BUSY. Retrying later.');
+                // Update state to match reality
+                STATE.agent.busy = true;
+                broadcast('agent_state', { busy: true });
+            } else {
+                console.log('[QUEUE] Injection failed (non-busy). dropping.', injection.error);
+                // Drop it to avoid infinite block? Or retry? 
+                // For now, drop after 3 failures? We'll just drop for safety.
+                STATE.actionQueue.shift();
+                saveState();
+            }
+        } catch (e) {
+            console.error('[QUEUE] Error processing:', e);
+        }
+    }
+}, 2000); // Check every 2 seconds
+
+// --- Tab & Queue API ---
+
+// POST /api/queue
+app.post('/api/queue', (req, res) => {
+    const { text, from } = req.body;
+    if (!text) return res.json({ ok: false, error: 'missing_text' });
+
+    STATE.actionQueue.push({
+        id: Date.now().toString(),
+        text,
+        from: from || 'api',
+        addedAt: new Date().toISOString()
+    });
+    saveState();
+
+    console.log(`[QUEUE] Added action. Size: ${STATE.actionQueue.length}`);
+    broadcast('queue_update', { count: STATE.actionQueue.length });
+    res.json({ ok: true, position: STATE.actionQueue.length });
+});
+
+// GET /api/tabs
+app.get('/api/tabs', async (req, res) => {
+    try {
+        const result = await cdpBridge.getTabs();
+        res.json(result);
+    } catch (e) {
+        res.json({ ok: false, error: e.message });
+    }
+});
+
+// POST /api/tabs/focus
+app.post('/api/tabs/focus', async (req, res) => {
+    const { name } = req.body;
+    if (!name) return res.json({ ok: false, error: 'missing_name' });
+
+    try {
+        const result = await cdpBridge.focusTab(name);
+        res.json(result);
+    } catch (e) {
+        res.json({ ok: false, error: e.message });
+    }
+});
+
+
+// --- Delegation API (Supervisor Pattern) ---
+
+// Model configuration for delegation
+const AVAILABLE_MODELS = [
+    { index: 0, name: 'Gemini 3 Pro (High)', key: 'gemini-pro-high' },
+    { index: 1, name: 'Gemini 3 Pro (Low)', key: 'gemini-pro-low' },
+    { index: 2, name: 'Gemini 3 Flash', key: 'gemini-flash' },
+    { index: 3, name: 'Claude Sonnet 4.5', key: 'claude-sonnet' },
+    { index: 4, name: 'Claude Sonnet 4.5 (Thinking)', key: 'claude-sonnet-thinking' },
+    { index: 5, name: 'Claude Opus 4.5 (Thinking)', key: 'claude-opus-thinking' },
+    { index: 6, name: 'GPT-OSS 120B (Medium)', key: 'gpt-oss-120b' }
+];
+
+// POST /api/delegation - Create a new delegation task with optional model selection
+app.post('/api/delegation', async (req, res) => {
+    const { target_tab, task, priority, timeout_ms, model } = req.body;
+    if (!target_tab || !task) {
+        return res.json({ ok: false, error: 'missing_target_tab_or_task' });
+    }
+
+    // Resolve model - can be index (0-6), name, or key
+    let modelInfo = null;
+    if (model !== undefined && model !== null) {
+        if (typeof model === 'number') {
+            modelInfo = AVAILABLE_MODELS.find(m => m.index === model);
+        } else if (typeof model === 'string') {
+            modelInfo = AVAILABLE_MODELS.find(m =>
+                m.name.toLowerCase().includes(model.toLowerCase()) ||
+                m.key.toLowerCase() === model.toLowerCase()
+            );
+        }
+    }
+
+    const delegation = {
+        id: 'del_' + Date.now().toString(36) + Math.random().toString(36).substr(2, 5),
+        target_tab,
+        task,
+        model: modelInfo ? modelInfo.name : null,
+        modelIndex: modelInfo ? modelInfo.index : null,
+        priority: priority || 'normal',
+        timeout_ms: timeout_ms || 300000,
+        status: 'pending',
+        createdAt: new Date().toISOString(),
+        startedAt: null,
+        completedAt: null,
+        result: null,
+        error: null
+    };
+
+    STATE.delegations.push(delegation);
+    if (STATE.delegations.length > 50) STATE.delegations.shift();
+    saveState();
+    console.log(`[DELEGATION] Created: ${delegation.id} -> ${target_tab}${modelInfo ? ` (model: ${modelInfo.name})` : ''}`);
+
+    try {
+        // Step 1: Focus the target tab
+        const focusResult = await cdpBridge.focusTab(target_tab);
+        if (!focusResult.ok) {
+            delegation.status = 'failed';
+            delegation.error = `Tab focus failed: ${focusResult.error}`;
+            saveState();
+            broadcast('delegation_update', delegation);
+            return res.json({ ok: true, delegation });
+        }
+
+        // Step 2: Switch model if specified (give time for tab to focus)
+        if (modelInfo) {
+            console.log(`[DELEGATION] Switching to model ${modelInfo.index}: ${modelInfo.name}`);
+            await new Promise(r => setTimeout(r, 500)); // Wait for focus
+
+            // Click the model selector and choose model
+            const modelSwitchCode = `
+                (function() {
+                    try {
+                        // Find model selector button and click it
+                        const modelButton = document.querySelector('[data-testid="model-selector-button"]') 
+                            || Array.from(document.querySelectorAll('button')).find(b => b.textContent.includes('Model'));
+                        if (modelButton) {
+                            modelButton.click();
+                            setTimeout(() => {
+                                // Click the specific model option
+                                const options = document.querySelectorAll('[role="option"], [data-model-index="${modelInfo.index}"]');
+                                if (options[${modelInfo.index}]) options[${modelInfo.index}].click();
+                            }, 200);
+                        }
+                        return { ok: true };
+                    } catch(e) {
+                        return { ok: false, error: e.message };
+                    }
+                })()
+            `;
+            // Model switch attempted - continue even if it fails
+            await cdpBridge.evaluate(modelSwitchCode).catch(() => { });
+            await new Promise(r => setTimeout(r, 300)); // Wait for model switch
+        }
+
+        // Step 3: Queue the task
+        delegation.status = 'in_progress';
+        delegation.startedAt = new Date().toISOString();
+        STATE.actionQueue.push({
+            id: delegation.id,
+            text: task,
+            from: 'delegation',
+            model: modelInfo ? modelInfo.name : null,
+            addedAt: new Date().toISOString()
+        });
+        saveState();
+        console.log(`[DELEGATION] Dispatched to ${target_tab}`);
+
+    } catch (e) {
+        delegation.status = 'failed';
+        delegation.error = e.message;
+        saveState();
+    }
+
+    broadcast('delegation_update', delegation);
+    res.json({ ok: true, delegation });
+});
+
+// GET /api/delegation - Get all delegations or specific one
+app.get('/api/delegation', (req, res) => {
+    const { id, status } = req.query;
+    let items = STATE.delegations;
+    if (id) items = items.filter(d => d.id === id);
+    if (status) items = items.filter(d => d.status === status);
+
+    const now = Date.now();
+    for (const d of items) {
+        if (d.status === 'in_progress' && d.startedAt) {
+            const elapsed = now - new Date(d.startedAt).getTime();
+            if (elapsed > d.timeout_ms) {
+                d.status = 'timeout';
+                d.error = `Timeout after ${Math.round(elapsed / 1000)}s`;
+                saveState();
+            }
+        }
+    }
+
+    res.json({
+        ok: true,
+        delegations: items,
+        summary: {
+            pending: STATE.delegations.filter(d => d.status === 'pending').length,
+            in_progress: STATE.delegations.filter(d => d.status === 'in_progress').length,
+            completed: STATE.delegations.filter(d => d.status === 'completed').length,
+            failed: STATE.delegations.filter(d => d.status === 'failed' || d.status === 'timeout').length
+        }
+    });
+});
+
+// POST /api/delegation/:id/complete - Mark delegation as complete
+app.post('/api/delegation/:id/complete', (req, res) => {
+    const { id } = req.params;
+    const { result, error } = req.body;
+    const delegation = STATE.delegations.find(d => d.id === id);
+    if (!delegation) return res.json({ ok: false, error: 'not_found' });
+
+    delegation.status = error ? 'failed' : 'completed';
+    delegation.completedAt = new Date().toISOString();
+    delegation.result = result || null;
+    delegation.error = error || null;
+    saveState();
+
+    console.log(`[DELEGATION] ${id} marked as ${delegation.status}`);
+    broadcast('delegation_update', delegation);
+    res.json({ ok: true, delegation });
+});
+
+// POST /api/delegation/:id/accept - Accept/claim a delegation task
+app.post('/api/delegation/:id/accept', (req, res) => {
+    const { id } = req.params;
+    const delegation = STATE.delegations.find(d => d.id === id);
+    if (!delegation) return res.json({ ok: false, error: 'not_found' });
+
+    if (delegation.status === 'completed') {
+        return res.json({ ok: false, error: 'already_completed' });
+    }
+
+    // Mark as accepted/in_progress and reset timeout
+    delegation.status = 'in_progress';
+    delegation.acceptedAt = new Date().toISOString();
+    delegation.startedAt = new Date().toISOString(); // Reset timeout clock
+    saveState();
+
+    console.log(`[DELEGATION] ${id} accepted by agent`);
+    broadcast('delegation_update', delegation);
+    res.json({ ok: true, delegation });
+});
+
 
 // Load Lisan
 let LISAN_CORPUS = [];
@@ -330,13 +665,49 @@ app.post('/api/stop', async (req, res) => {
     }
 });
 
+// POST /api/new-chat
+app.post('/api/new-chat', async (req, res) => {
+    console.log('[API] New Chat requested');
+    try {
+        // Ctrl(2) + l
+        const result = await cdpBridge.triggerShortcut(2, 'l', 'KeyL', 76, 38);
+        console.log('[API] New Chat Result:', result);
+        res.json({ success: result.ok, error: result.error });
+    } catch (e) {
+        console.error('[API] New Chat Error:', e);
+        res.json({ success: false, error: e.message });
+    }
+});
+
 // POST /api/set-model
 app.post('/api/set-model', async (req, res) => {
+    console.log('[API] Set Model requested', req.body);
+    const { index } = req.body;
+    const targetIndex = parseInt(index) || 0;
+
     try {
-        await run("xdotool key ctrl+shift+m");
-        res.json({ success: true });
+        // 1. Open Menu: Ctrl(2) + Shift(8) = 10 + m
+        await cdpBridge.triggerShortcut(10, 'M', 'KeyM', 77, 50);
+
+        // 2. Wait for menu
+        await new Promise(r => setTimeout(r, 300));
+
+        // 3. Arrow Down 'index' times
+        for (let i = 0; i < targetIndex; i++) {
+            // ArrowDown (0 modifiers)
+            await cdpBridge.triggerShortcut(0, 'ArrowDown', 'ArrowDown', 40, 116);
+            await new Promise(r => setTimeout(r, 50));
+        }
+
+        // 4. Select: Enter
+        await new Promise(r => setTimeout(r, 100));
+        await cdpBridge.triggerShortcut(0, 'Enter', 'Enter', 13, 36);
+
+        console.log(`[API] Set Model: Selected index ${targetIndex}`);
+        res.json({ success: true, index: targetIndex });
     } catch (e) {
-        res.json({ success: false });
+        console.error('[API] Set Model Error:', e);
+        res.json({ success: false, error: e.message });
     }
 });
 
