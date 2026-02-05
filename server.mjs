@@ -33,8 +33,7 @@ setInterval(() => {
     cdpBridge.startObserver();
 }, 5000);
 
-// Initialize CDP
-cdpBridge.start();
+// CDP is initialized in main()
 const PORT = parseInt(process.env.PORT || '8787');
 
 const app = express();

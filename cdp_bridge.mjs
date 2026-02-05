@@ -2,7 +2,7 @@ import WebSocket from 'ws';
 import http from 'http';
 
 // Configuration
-const CDP_PORT = 9000;
+const CDP_PORT = 9222;
 const DEBUG = true;
 
 function log(...args) {
@@ -25,23 +25,39 @@ const EXPRESSION_BUSY = `(() => {
 const EXPRESSION_INJECT = (message) => `(async () => {
   const text = ${JSON.stringify(message)};
   
-  // 1. Find the editor
-  const editors = [...document.querySelectorAll('#cascade [data-lexical-editor="true"][contenteditable="true"][role="textbox"]')]
+  // Try 1: Launchpad input element (jetski-agent)
+  const quickInput = document.querySelector('input.w-full.py-2');
+  if (quickInput && quickInput.offsetParent !== null) {
+    quickInput.focus();
+    quickInput.value = text;
+    quickInput.dispatchEvent(new Event('input', { bubbles: true }));
+    
+    await new Promise(r => setTimeout(r, 100));
+    
+    // Submit via Enter key
+    quickInput.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Enter', code: 'Enter', keyCode: 13 }));
+    quickInput.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: 'Enter', code: 'Enter', keyCode: 13 }));
+    
+    return { ok: true, method: 'launchpad_input' };
+  }
+  
+  // Try 2: IDE contenteditable editor (lexical - may or may not be in #cascade)
+  const editors = [...document.querySelectorAll('[data-lexical-editor="true"][contenteditable="true"][role="textbox"]')]
     .filter(el => el.offsetParent !== null);
   const editor = editors.at(-1);
   
   if (!editor) return { ok: false, error: "editor_not_found" };
 
-  // 2. Check busy state again
+  // Check busy state
   const cancel = document.querySelector('[data-tooltip-id="input-send-button-cancel-tooltip"]');
   if (cancel && cancel.offsetParent !== null) return { ok: false, reason: "busy_cancel_visible" };
 
-  // 3. Clear and Focus
+  // Clear and Focus
   editor.focus();
   document.execCommand?.("selectAll", false, null);
   document.execCommand?.("delete", false, null);
 
-  // 4. Insert Text
+  // Insert Text
   let inserted = false;
   try { inserted = !!document.execCommand?.("insertText", false, text); } catch {}
   if (!inserted) {
@@ -50,13 +66,12 @@ const EXPRESSION_INJECT = (message) => `(async () => {
     editor.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: text }));
   }
 
-  // Allow UI updates
   await new Promise(r => setTimeout(r, 100));
 
-  // 5. Submit
+  // Submit
   const submit = document.querySelector("svg.lucide-arrow-right")?.closest("button");
   if (submit && !submit.disabled) {
-    setTimeout(() => submit.click(), 50); // Delay click to allow return value to pass
+    setTimeout(() => submit.click(), 50);
     return { ok: true, method: "click_submit" };
   }
 
@@ -68,51 +83,50 @@ const EXPRESSION_INJECT = (message) => `(async () => {
 })()`;
 
 // Logic: Get History List logic
-// Logic: Get History List logic
 const EXPRESSION_GET_HISTORY = `(() => {
-  // Try to find the history list in the sidebar
-  // Updated with observed flex-row classes for history items
-  const selector = '.history-item, [aria-label*="Chat History"] .monaco-list-row, .flex.flex-row.items-center.justify-between';
-  
-  // Filter out non-history items from generic selector
-  const genericItems = Array.from(document.querySelectorAll('.flex.flex-row.items-center.justify-between'));
-  const validGeneric = genericItems.filter(el => el.innerText.includes('ago') || el.innerText.includes('Just now'));
-  
-  const specificItems = Array.from(document.querySelectorAll('.history-item, [aria-label*="Chat History"] .monaco-list-row'));
-  
-  const items = [...new Set([...specificItems, ...validGeneric])];
-  
-  if (items.length === 0) {
-     return { ok: true, history: [] }; 
-  }
+    // Try to find the history list in the sidebar
+    // Updated with observed flex-row classes for history items
+    const selector = '.history-item, [aria-label*="Chat History"] .monaco-list-row, .flex.flex-row.items-center.justify-between';
 
-  return {
-    ok: true,
-    history: items.map((el, idx) => ({
-      index: idx,
-      title: el.innerText.split('\\n')[0] || el.getAttribute('aria-label') || 'Untitled',
-      active: el.classList.contains('focused') || el.classList.contains('selected') || el.classList.contains('bg-gray-500/10')
-    }))
-  };
+    // Filter out non-history items from generic selector
+    const genericItems = Array.from(document.querySelectorAll('.flex.flex-row.items-center.justify-between'));
+    const validGeneric = genericItems.filter(el => el.innerText.includes('ago') || el.innerText.includes('Just now'));
+
+    const specificItems = Array.from(document.querySelectorAll('.history-item, [aria-label*="Chat History"] .monaco-list-row'));
+
+    const items = [...new Set([...specificItems, ...validGeneric])];
+
+    if (items.length === 0) {
+        return { ok: true, history: [] };
+    }
+
+    return {
+        ok: true,
+        history: items.map((el, idx) => ({
+            index: idx,
+            title: el.innerText.split('\\n')[0] || el.getAttribute('aria-label') || 'Untitled',
+            active: el.classList.contains('focused') || el.classList.contains('selected') || el.classList.contains('bg-gray-500/10')
+        }))
+    };
 })()`;
 
 // Logic: Load History Item
 const EXPRESSION_LOAD_HISTORY = (index) => `(() => {
-  const selector = '.history-item, [aria-label*="Chat History"] .monaco-list-row, .flex.flex-row.items-center.justify-between';
-  
-  const genericItems = Array.from(document.querySelectorAll('.flex.flex-row.items-center.justify-between'));
-  const validGeneric = genericItems.filter(el => el.innerText.includes('ago') || el.innerText.includes('Just now'));
-  
-  const specificItems = Array.from(document.querySelectorAll('.history-item, [aria-label*="Chat History"] .monaco-list-row'));
-  
-  const items = [...new Set([...specificItems, ...validGeneric])];
-  
-  const target = items[${index}];
-  if (target) {
-     target.click();
-     return { ok: true };
-  }
-  return { ok: false, error: 'item_not_found' };
+    const selector = '.history-item, [aria-label*="Chat History"] .monaco-list-row, .flex.flex-row.items-center.justify-between';
+
+    const genericItems = Array.from(document.querySelectorAll('.flex.flex-row.items-center.justify-between'));
+    const validGeneric = genericItems.filter(el => el.innerText.includes('ago') || el.innerText.includes('Just now'));
+
+    const specificItems = Array.from(document.querySelectorAll('.history-item, [aria-label*="Chat History"] .monaco-list-row'));
+
+    const items = [...new Set([...specificItems, ...validGeneric])];
+
+    const target = items[${index}];
+    if (target) {
+        target.click();
+        return { ok: true };
+    }
+    return { ok: false, error: 'item_not_found' };
 })()`;
 
 export class CdpBridge {
@@ -126,10 +140,12 @@ export class CdpBridge {
     }
 
     start() {
+        console.log('[CDP] start() called');
         this.connect();
     }
 
     async connect() {
+        console.log('[CDP] connect() called');
         try {
             const target = await this.findTarget();
             if (!target) {
@@ -186,26 +202,44 @@ export class CdpBridge {
 
     async findTarget() {
         return new Promise((resolve) => {
+            log('Looking for target at', `http://127.0.0.1:${CDP_PORT}/json/list`);
             http.get(`http://127.0.0.1:${CDP_PORT}/json/list`, (res) => {
                 let data = '';
                 res.on('data', chunk => data += chunk);
                 res.on('end', () => {
                     try {
                         const list = JSON.parse(data);
-                        // Prioritize IDE window or windows with Antigravity title
+                        log('Found', list.length, 'targets');
+
+                        // Priority 1: Main IDE window with Antigravity title
                         let found = list.find(t =>
-                            t.url.includes('localhost:9090') ||
-                            (t.title && t.title.toLowerCase().includes('antigravity'))
+                            (t.title && t.title.toLowerCase().includes('antigravity')) &&
+                            t.url.includes('workbench.html') && !t.url.includes('jetski')
                         );
 
-                        // Fallback logic from poke.mjs
-                        if (!found) found = list.find(t => t.url.includes('workbench.html'));
+                        // Priority 2: Any workbench.html page
+                        if (!found) found = list.find(t =>
+                            t.url.includes('workbench.html') && !t.url.includes('jetski')
+                        );
+
+                        // Priority 3: Launchpad (jetski-agent) as fallback
+                        if (!found) found = list.find(t => t.url.includes('jetski-agent'));
+
+                        // Fallback: any page
                         if (!found) found = list.find(t => t.type === 'page');
 
+                        if (found) log('Selected target:', found.title);
+                        else log('No suitable target found');
                         resolve(found);
-                    } catch { resolve(null); }
+                    } catch (e) {
+                        log('Parse error:', e.message);
+                        resolve(null);
+                    }
                 });
-            }).on('error', () => resolve(null));
+            }).on('error', (e) => {
+                log('HTTP error:', e.message);
+                resolve(null);
+            });
         });
     }
 
@@ -299,7 +333,7 @@ export class CdpBridge {
             try {
                 // Quick check if this context has the chat input
                 const check = await this.send('Runtime.evaluate', {
-                    expression: `document.querySelector('textarea, [contenteditable="true"]') ? true : false`,
+                    expression: `document.querySelector('input.w-full, textarea, [contenteditable="true"]') ? true : false`,
                     contextId,
                     returnByValue: true
                 });
