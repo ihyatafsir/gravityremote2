@@ -655,13 +655,30 @@ app.post('/api/agent-mode', async (req, res) => {
     }
 });
 
-// POST /api/stop
+// POST /api/stop - Enhanced: CDP first, xdotool fallback
 app.post('/api/stop', async (req, res) => {
     try {
+        // Layer 1: Try CDP cancel button click
+        const cdpResult = await cdpBridge.stopAgent();
+        if (cdpResult.ok) {
+            STATE.agent.busy = false;
+            broadcast('agent_state', { busy: false });
+            saveState();
+            return res.json({ success: true, method: 'cdp' });
+        }
+
+        // Layer 2: Fallback to xdotool Escape
         await run("xdotool key Escape");
-        res.json({ success: true });
+        STATE.agent.busy = false;
+        broadcast('agent_state', { busy: false });
+        saveState();
+        res.json({ success: true, method: 'xdotool' });
     } catch (e) {
-        res.json({ success: false });
+        // Still mark as not busy even on error
+        STATE.agent.busy = false;
+        broadcast('agent_state', { busy: false });
+        saveState();
+        res.json({ success: false, error: e.message });
     }
 });
 
@@ -874,10 +891,35 @@ server.on('upgrade', (request, socket, head) => {
 
 wss.on('connection', (ws) => {
     console.log('[WS] Client connected');
+    ws.isAlive = true;
     ws.send(JSON.stringify({ event: 'hello', payload: { name: 'ag_bridge' } }));
 
+    // Handle client messages (ping/pong for keep-alive)
+    ws.on('message', (raw) => {
+        try {
+            const msg = JSON.parse(raw);
+            if (msg.event === 'ping') {
+                ws.send(JSON.stringify({ event: 'pong' }));
+            }
+        } catch (e) { /* ignore non-JSON */ }
+        ws.isAlive = true;
+    });
+
+    ws.on('pong', () => { ws.isAlive = true; });
     ws.on('close', () => console.log('[WS] Client disconnected'));
 });
+
+// Server-side keep-alive: ping all clients every 30s, terminate dead ones
+setInterval(() => {
+    wss.clients.forEach((ws) => {
+        if (ws.isAlive === false) {
+            console.log('[WS] Terminating dead client');
+            return ws.terminate();
+        }
+        ws.isAlive = false;
+        ws.ping();
+    });
+}, 30000);
 
 // --- Start ---
 async function main() {

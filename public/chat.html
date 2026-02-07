@@ -37,7 +37,6 @@
             display: flex;
             flex-direction: column;
             gap: 8px;
-            /* Compact */
         }
 
         .message {
@@ -55,12 +54,10 @@
             justify-content: space-between;
         }
 
-        /* User: Just "You" or "User" in bold, no emoji */
         .message.user .sender-row {
             color: #cccccc;
         }
 
-        /* Agent: "Antigravity" or "Assistant" */
         .message.assistant .sender-row {
             color: #007fd4;
         }
@@ -71,7 +68,6 @@
             color: #d4d4d4;
         }
 
-        /* Code blocks */
         code {
             font-family: 'Consolas', monospace;
             background: rgba(255, 255, 255, 0.1);
@@ -82,7 +78,6 @@
 
         pre {
             background: #1e1e1e;
-            /* Match bg or slightly lighter */
             border: 1px solid #333;
             padding: 8px;
             overflow-x: auto;
@@ -176,10 +171,57 @@
                 opacity: 0.5;
             }
         }
+
+        /* Stop button styles */
+        .stop-btn {
+            background: #e53935;
+            color: white;
+            border-radius: 4px;
+            width: 28px;
+            height: 28px;
+            padding: 0;
+            display: none;
+            justify-content: center;
+            align-items: center;
+            margin-right: 4px;
+            flex-shrink: 0;
+            -webkit-tap-highlight-color: transparent;
+            touch-action: manipulation;
+        }
+
+        .stop-btn:active {
+            background: #c62828;
+            transform: scale(0.92);
+        }
+
+        .stop-btn .stop-icon {
+            width: 8px;
+            height: 8px;
+            background: white;
+            border-radius: 1px;
+        }
+
+        /* Connection indicator */
+        .conn-dot {
+            position: fixed;
+            top: 4px;
+            right: 4px;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #e53935;
+            z-index: 100;
+            transition: background 0.3s;
+        }
+
+        .conn-dot.connected {
+            background: var(--accent);
+        }
     </style>
 </head>
 
 <body>
+    <div class="conn-dot" id="connDot" title="WebSocket status"></div>
     <div class="chat-list" id="chatList">
         <div class="welcome-ph" id="welcome"></div>
     </div>
@@ -191,21 +233,18 @@
         <div class="input-wrapper">
             <input type="file" id="fileInput" hidden multiple>
             <button id="attachBtn" title="Attach Files">
-                <!-- Simple clip icon -->
                 <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
                     <path
                         d="M10.5 5a2.5 2.5 0 1 0-5 0v6a.5.5 0 0 0 1 0V5a1.5 1.5 0 1 1 3 0v6a2.5 2.5 0 0 1-5 0V3H3.5v8a3.5 3.5 0 1 0 7 0V5z" />
                 </svg>
             </button>
 
-            <!-- Stop Button (Red Square) -->
-            <button id="stopBtn" title="Stop Generation"
-                style="background:#e53935; color:white; border-radius:4px; width:24px; height:24px; padding:0; display:none; justify-content:center; align-items:center; margin-right:8px;">
-                <div style="width:7px; height:7px; background:white; border-radius:1px;"></div>
+            <!-- Stop Button -->
+            <button id="stopBtn" class="stop-btn" title="Stop Generation">
+                <div class="stop-icon"></div>
             </button>
 
             <textarea id="msgInput" placeholder="Prompt..." rows="1"></textarea>
-            <!-- No send button? VS Code has one. I'll keep it subtle -->
             <button id="sendBtn" title="Send">
                 <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
                     <path
@@ -220,15 +259,211 @@
         const msgInput = document.getElementById('msgInput');
         const sendBtn = document.getElementById('sendBtn');
         const welcome = document.getElementById('welcome');
-        let ws = null;
+        const stopBtn = document.getElementById('stopBtn');
+        const typingInd = document.getElementById('typing-indicator');
+        const connDot = document.getElementById('connDot');
 
-        // Auto-resize
+        let ws = null;
+        let agentBusy = false;
+
+        // ============================================
+        // WebSocket Connection with Resilience
+        // ============================================
+        let reconnectAttempts = 0;
+        const MAX_RECONNECT_DELAY = 15000;
+        const BASE_RECONNECT_DELAY = 1000;
+        let heartbeatTimer = null;
+        let missedPongs = 0;
+        const MAX_MISSED_PONGS = 3;
+
+        function connect() {
+            if (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) {
+                return; // Already connected or connecting
+            }
+
+            const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            try {
+                ws = new WebSocket(`${proto}//${window.location.host}`);
+            } catch (e) {
+                scheduleReconnect();
+                return;
+            }
+
+            ws.onopen = () => {
+                reconnectAttempts = 0;
+                missedPongs = 0;
+                connDot.classList.add('connected');
+                startHeartbeat();
+                // Sync state on reconnect
+                pollAgentState();
+            };
+
+            ws.onmessage = (e) => {
+                try {
+                    const data = JSON.parse(e.data);
+
+                    // Reset pong counter on any message (server is alive)
+                    missedPongs = 0;
+
+                    if (data.event === 'message_new') {
+                        const m = data.payload;
+                        if (m.from === 'agent') {
+                            setAgentBusy(false);
+                            append(m);
+                        }
+                    }
+
+                    if (data.event === 'history_cleared') {
+                        chatList.innerHTML = '<div class="welcome-ph" style="margin-top:20px;">Chat Cleared</div>';
+                        setAgentBusy(false);
+                    }
+
+                    if (data.event === 'agent_state') {
+                        setAgentBusy(!!data.payload.busy);
+                    }
+
+                    if (data.event === 'pong') {
+                        missedPongs = 0;
+                    }
+                } catch (err) {
+                    // Ignore parse errors
+                }
+            };
+
+            ws.onclose = () => {
+                connDot.classList.remove('connected');
+                stopHeartbeat();
+                scheduleReconnect();
+            };
+
+            ws.onerror = () => {
+                // onclose will fire after this
+            };
+        }
+
+        function scheduleReconnect() {
+            const delay = Math.min(BASE_RECONNECT_DELAY * Math.pow(1.5, reconnectAttempts), MAX_RECONNECT_DELAY);
+            reconnectAttempts++;
+            setTimeout(connect, delay);
+        }
+
+        // Heartbeat: send ping every 10s, if 3 missed → reconnect
+        function startHeartbeat() {
+            stopHeartbeat();
+            heartbeatTimer = setInterval(() => {
+                if (!ws || ws.readyState !== WebSocket.OPEN) {
+                    stopHeartbeat();
+                    return;
+                }
+                missedPongs++;
+                if (missedPongs >= MAX_MISSED_PONGS) {
+                    // Force reconnect
+                    ws.close();
+                    return;
+                }
+                try {
+                    ws.send(JSON.stringify({ event: 'ping' }));
+                } catch (e) {
+                    ws.close();
+                }
+            }, 10000);
+        }
+
+        function stopHeartbeat() {
+            if (heartbeatTimer) {
+                clearInterval(heartbeatTimer);
+                heartbeatTimer = null;
+            }
+        }
+
+        // Reconnect when tab becomes visible again (mobile background/foreground)
+        document.addEventListener('visibilitychange', () => {
+            if (!document.hidden) {
+                // Tab became visible — verify connection
+                if (!ws || ws.readyState !== WebSocket.OPEN) {
+                    connect();
+                }
+                // Always poll state on wakeup to catch what we missed
+                pollAgentState();
+            }
+        });
+
+        // ============================================
+        // Agent State Management
+        // ============================================
+        function setAgentBusy(busy) {
+            agentBusy = busy;
+            typingInd.style.display = busy ? 'block' : 'none';
+            stopBtn.style.display = busy ? 'flex' : 'none';
+        }
+
+        // HTTP fallback: poll agent state (for when WS is unreliable)
+        async function pollAgentState() {
+            try {
+                const res = await fetch('/status');
+                if (res.ok) {
+                    const data = await res.json();
+                    if (data.ok && data.agent) {
+                        setAgentBusy(!!data.agent.busy);
+                    }
+                }
+            } catch (e) { /* ignore */ }
+        }
+
+        // Poll agent state every 5s as backup (lightweight — just /status)
+        setInterval(pollAgentState, 5000);
+
+        // ============================================
+        // Stop Button — Triple-layer reliability
+        // ============================================
+        let stopInProgress = false;
+
+        stopBtn.onclick = async (e) => {
+            e.preventDefault();
+            if (stopInProgress) return;
+            stopInProgress = true;
+
+            // Immediate visual feedback
+            stopBtn.style.opacity = '0.5';
+
+            try {
+                // Layer 1: CDP stop (primary — clicks cancel button in IDE)
+                const res = await fetch('/messages/stop', { method: 'POST' });
+                const data = await res.json();
+
+                if (!data.ok) {
+                    // Layer 2: API stop (xdotool Escape fallback)
+                    await fetch('/api/stop', { method: 'POST' });
+                }
+            } catch (e) {
+                // Layer 3: If both fail, try the xdotool fallback
+                try {
+                    await fetch('/api/stop', { method: 'POST' });
+                } catch (e2) { /* truly offline */ }
+            }
+
+            // Force UI update regardless
+            setAgentBusy(false);
+            // Broadcast to parent (mobile.html) if in iframe
+            try {
+                window.parent.postMessage({ event: 'agent_stopped' }, '*');
+            } catch (e) { }
+
+            stopBtn.style.opacity = '1';
+            stopInProgress = false;
+        };
+
+        // ============================================
+        // Chat Functions
+        // ============================================
+
+        // Auto-resize textarea
         msgInput.addEventListener('input', () => {
             msgInput.style.height = 'auto';
             msgInput.style.height = Math.min(msgInput.scrollHeight, 120) + 'px';
         });
 
-        // Shortcuts
+        // Enter to send
         msgInput.addEventListener('keydown', (e) => {
             if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
@@ -238,7 +473,7 @@
 
         sendBtn.onclick = send;
 
-        // Attach
+        // Attach files
         document.getElementById('attachBtn').onclick = () => document.getElementById('fileInput').click();
         document.getElementById('fileInput').onchange = (e) => {
             if (e.target.files.length) {
@@ -246,7 +481,7 @@
                 msgInput.value += ` [File: ${names}]`;
                 msgInput.focus();
             }
-        }
+        };
 
         async function send() {
             const text = msgInput.value.trim();
@@ -256,7 +491,7 @@
             msgInput.style.height = 'auto';
 
             append({ from: 'user', text });
-            showTyping();
+            setAgentBusy(true);
 
             try {
                 const res = await fetch('/messages/send', {
@@ -265,9 +500,12 @@
                     body: JSON.stringify({ to: 'agent', text })
                 });
                 const data = await res.json();
-                if (!data.ok) throw new Error(data.error || 'Injection failed');
+                if (!data.ok) {
+                    throw new Error(data.error || 'Injection failed');
+                }
             } catch (e) {
                 append({ from: 'system', text: `Error: ${e.message}` });
+                setAgentBusy(false);
             }
         }
 
@@ -277,10 +515,8 @@
             const div = document.createElement('div');
             div.className = `message ${msg.from === 'agent' ? 'assistant' : 'user'}`;
 
-            // Name only, no emoji
             const name = msg.from === 'agent' ? 'Antigravity' : (msg.from === 'system' ? 'System' : 'You');
 
-            // Simple Layout: Name on top, text below.
             div.innerHTML = `
                 <div class="sender-row">
                     <span>${name}</span>
@@ -299,69 +535,20 @@
                 .replace(/\n/g, '<br>');
         }
 
-        const typingInd = document.getElementById('typing-indicator');
-
-        let showTyping = function () { typingInd.style.display = 'block'; }
-        let hideTyping = function () { typingInd.style.display = 'none'; }
-
-        // WS
-        function connect() {
-            const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            ws = new WebSocket(`${proto}//${window.location.host}`);
-            ws.onmessage = (e) => {
-                const data = JSON.parse(e.data);
-                if (data.event === 'message_new') {
-                    const m = data.payload;
-                    if (m.from === 'agent') {
-                        hideTyping();
-                        append(m);
-                    }
-                }
-                if (data.event === 'history_cleared') {
-                    chatList.innerHTML = '<div class="welcome-ph" id="welcome" style="margin-top:20px;">Chat Cleared</div>';
-                    hideTyping();
-                }
-
-                // Agent State Sync
-                if (data.event === 'agent_state') {
-                    const isBusy = data.payload.busy;
-                    if (isBusy) {
-                        showTyping();
-                    } else {
-                        hideTyping();
-                    }
-                }
-            };
-            ws.onclose = () => setTimeout(connect, 3000);
-        }
+        // ============================================
+        // Initialize
+        // ============================================
         connect();
 
-        // Stop Button Logic
-        const stopBtn = document.getElementById('stopBtn');
-        const fileBtn = document.getElementById('fileInput').parentElement;
-
-        stopBtn.onclick = async () => {
-            await fetch('/messages/stop', { method: 'POST' });
-            hideTyping();
-        };
-
-        const originalShowTyping = showTyping;
-        showTyping = function () {
-            typingInd.style.display = 'block';
-            stopBtn.style.display = 'flex'; // Show Stop
-        }
-
-        hideTyping = function () {
-            typingInd.style.display = 'none';
-            stopBtn.style.display = 'none'; // Hide Stop
-        }
-
-        // Load Inbox
+        // Load recent inbox
         fetch('/messages/inbox?limit=50').then(r => r.json()).then(d => {
             if (d.ok && d.messages.length) {
                 d.messages.reverse().forEach(append);
             }
-        });
+        }).catch(() => { });
+
+        // Initial state sync
+        pollAgentState();
     </script>
 </body>
 

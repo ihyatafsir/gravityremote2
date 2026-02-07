@@ -2,7 +2,7 @@ import WebSocket from 'ws';
 import http from 'http';
 
 // Configuration
-const CDP_PORT = 9000;
+const CDP_PORT = 9222;
 const DEBUG = true;
 
 function log(...args) {
@@ -25,8 +25,8 @@ const EXPRESSION_BUSY = `(() => {
 const EXPRESSION_INJECT = (message) => `(async () => {
   const text = ${JSON.stringify(message)};
   
-  // 1. Find the editor
-  const editors = [...document.querySelectorAll('#cascade [data-lexical-editor="true"][contenteditable="true"][role="textbox"]')]
+  // 1. Find the editor — try multiple selectors for compatibility
+  const editors = [...document.querySelectorAll('[data-lexical-editor="true"][contenteditable="true"][role="textbox"]')]
     .filter(el => el.offsetParent !== null);
   const editor = editors.at(-1);
   
@@ -53,10 +53,12 @@ const EXPRESSION_INJECT = (message) => `(async () => {
   // Allow UI updates
   await new Promise(r => setTimeout(r, 100));
 
-  // 5. Submit
-  const submit = document.querySelector("svg.lucide-arrow-right")?.closest("button");
+  // 5. Submit — try multiple selectors
+  const submit = document.querySelector("svg.lucide-arrow-right")?.closest("button")
+    || document.querySelector('[data-tooltip-id="input-send-button-tooltip"]')
+    || document.querySelector('button[type="submit"]');
   if (submit && !submit.disabled) {
-    setTimeout(() => submit.click(), 50); // Delay click to allow return value to pass
+    setTimeout(() => submit.click(), 50);
     return { ok: true, method: "click_submit" };
   }
 
