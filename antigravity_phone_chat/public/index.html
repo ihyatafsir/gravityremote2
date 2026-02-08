@@ -174,19 +174,17 @@
             });
         }
 
-        // System stats polling (best-effort from server)
+        // System stats polling (real CPU/RAM from server)
         async function pollSystemStats() {
             try {
                 const res = await fetch('/health');
                 if (res.ok) {
                     const data = await res.json();
-                    // Show uptime-derived info if available
-                    if (data.uptime) {
-                        const mins = Math.floor(data.uptime / 60);
-                        document.getElementById('cpuStat').textContent = mins + 'm';
+                    if (data.cpu !== undefined) {
+                        document.getElementById('cpuStat').textContent = data.cpu + '%';
                     }
-                    if (data.connections !== undefined) {
-                        document.getElementById('ramStat').textContent = data.connections + 'ws';
+                    if (data.ram) {
+                        document.getElementById('ramStat').textContent = data.ram.usedGB + '/' + data.ram.totalGB + 'G';
                     }
                 }
             } catch (e) {
