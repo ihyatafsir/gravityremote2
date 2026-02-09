@@ -12,7 +12,7 @@ import WebSocket from 'ws';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { inspectUI } from './ui_inspector.js';
-import { execSync } from 'child_process';
+import { execSync, spawn } from 'child_process';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -1729,6 +1729,61 @@ async function createServer() {
         if (!cdpConnection) return res.status(503).json({ error: 'CDP disconnected' });
         const result = await stopGeneration(cdpConnection);
         res.json(result);
+    });
+
+    // Restart IDE - Kill antigravity and restart with debug port
+    app.post('/restart-ide', async (req, res) => {
+        console.log('🔄 Restart IDE requested...');
+        try {
+            // Close existing CDP connection first
+            if (cdpConnection && cdpConnection.ws) {
+                try { cdpConnection.ws.close(); } catch (e) { }
+                cdpConnection = null;
+            }
+
+            // Kill all antigravity processes
+            try {
+                execSync('pkill -f antigravity || true', { stdio: 'pipe' });
+                console.log('  ✅ Killed antigravity processes');
+            } catch (e) {
+                console.log('  ⚠️  No antigravity processes found or kill failed');
+            }
+
+            // Wait for processes to die
+            await new Promise(r => setTimeout(r, 2000));
+
+            // Start antigravity with debug port
+            const child = spawn('antigravity', ['--remote-debugging-port=9222'], {
+                detached: true,
+                stdio: 'ignore',
+                env: { ...process.env }
+            });
+            child.unref();
+            console.log('  🚀 Started antigravity --remote-debugging-port=9222 (PID:', child.pid, ')');
+
+            // Wait for IDE to boot and CDP to become available
+            res.json({ success: true, message: 'IDE restarting...', pid: child.pid });
+
+            // Reconnect CDP after IDE boots (in background)
+            setTimeout(async () => {
+                for (let attempt = 0; attempt < 15; attempt++) {
+                    try {
+                        const endpoint = await discoverCDP();
+                        cdpConnection = await connectCDP(endpoint.url);
+                        console.log('  ✅ CDP reconnected after restart');
+                        return;
+                    } catch (e) {
+                        console.log(`  ⏳ CDP reconnect attempt ${attempt + 1}/15...`);
+                        await new Promise(r => setTimeout(r, 3000));
+                    }
+                }
+                console.error('  ❌ Failed to reconnect CDP after restart');
+            }, 5000);
+
+        } catch (e) {
+            console.error('Restart IDE error:', e);
+            res.status(500).json({ error: e.message });
+        }
     });
 
     // Send message

@@ -682,10 +682,60 @@ function renderAttachPreviews() {
 
 sendBtn.addEventListener('click', sendMessage);
 
-refreshBtn.addEventListener('click', () => {
-    // Refresh both Chat and State (Mode/Model)
-    loadSnapshot();
-    fetchAppState(); // PRIORITY: Sync from Desktop
+refreshBtn.addEventListener('click', async () => {
+    // Restart IDE: Kill antigravity and relaunch with --remote-debugging-port=9222
+    if (!confirm('Restart IDE?\n\nThis will shut down Antigravity and relaunch it with debug port 9222.')) return;
+
+    refreshBtn.textContent = '⏳ Restarting...';
+    refreshBtn.disabled = true;
+    refreshBtn.style.opacity = '0.5';
+
+    try {
+        const res = await fetchWithAuth('/restart-ide', { method: 'POST' });
+        const data = await res.json();
+
+        if (data.success) {
+            // Show countdown while IDE restarts
+            let countdown = 15;
+            chatContent.innerHTML = `
+                <div class="empty-state">
+                    <svg class="empty-state-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                        <path d="M23 4v6h-6M1 20v-6h6"></path>
+                        <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
+                    </svg>
+                    <h2>IDE Restarting...</h2>
+                    <p>antigravity --remote-debugging-port=9222</p>
+                    <p id="restartCountdown" style="font-size: 24px; font-weight: 600; color: #22c55e;">⏳ ${countdown}s</p>
+                </div>
+            `;
+
+            const countdownEl = document.getElementById('restartCountdown');
+            const timer = setInterval(() => {
+                countdown--;
+                if (countdownEl) countdownEl.textContent = `⏳ ${countdown}s`;
+                if (countdown <= 0) {
+                    clearInterval(timer);
+                    // Try to reconnect
+                    refreshBtn.textContent = '↻ Restart IDE';
+                    refreshBtn.disabled = false;
+                    refreshBtn.style.opacity = '1';
+                    loadSnapshot();
+                    fetchAppState();
+                }
+            }, 1000);
+        } else {
+            alert('Restart failed: ' + (data.error || 'Unknown error'));
+            refreshBtn.textContent = '↻ Restart IDE';
+            refreshBtn.disabled = false;
+            refreshBtn.style.opacity = '1';
+        }
+    } catch (e) {
+        console.error('Restart IDE error:', e);
+        alert('Failed to restart IDE: ' + e.message);
+        refreshBtn.textContent = '↻ Restart IDE';
+        refreshBtn.disabled = false;
+        refreshBtn.style.opacity = '1';
+    }
 });
 
 messageInput.addEventListener('keydown', (e) => {
