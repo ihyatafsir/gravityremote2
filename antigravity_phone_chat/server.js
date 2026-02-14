@@ -18,7 +18,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 const PORTS = [9222, 9000, 9001, 9002, 9003];
-const POLL_INTERVAL = 1000; // 1 second
+const POLL_INTERVAL = 3000; // 3 seconds (was 1s — too aggressive, stalls IDE terminal)
 const SERVER_PORT = process.env.PORT || 3000;
 const APP_PASSWORD = process.env.APP_PASSWORD || 'antigravity';
 const AUTH_COOKIE_NAME = 'ag_auth_token';
@@ -1438,6 +1438,13 @@ async function startPolling(wss) {
                 // Not found yet, just wait for next cycle
             }
             setTimeout(poll, 2000); // Try again in 2 seconds if not found
+            return;
+        }
+
+        // Skip heavy snapshot if no phone clients are connected — no point blocking IDE
+        const hasClients = wss.clients.size > 0;
+        if (!hasClients) {
+            setTimeout(poll, POLL_INTERVAL * 2); // Even slower when nobody's watching
             return;
         }
 
