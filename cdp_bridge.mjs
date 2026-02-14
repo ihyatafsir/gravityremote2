@@ -322,17 +322,25 @@ export class CdpBridge {
         const contextIds = [...this.contexts.keys()];
         if (contextIds.length === 0) return { ok: false, error: 'no_contexts' };
 
+        log(`[INJECT] Scanning ${contextIds.length} contexts for chat input...`);
+
         // Prioritize later contexts (usually iframes created last)
         for (const contextId of contextIds.reverse()) {
             try {
-                // Quick check if this context has the chat input
+                // Quick check if this context has the CHAT input specifically
+                // Use tight selectors: Lexical chat editor OR launchpad input — NOT generic [contenteditable]
                 const check = await this.send('Runtime.evaluate', {
-                    expression: `document.querySelector('input.w-full, textarea, [contenteditable="true"]') ? true : false`,
+                    expression: `document.querySelector('input.w-full.py-2, [data-lexical-editor="true"][contenteditable="true"][role="textbox"]') ? true : false`,
                     contextId,
                     returnByValue: true
                 });
 
-                if (!check.result || !check.result.value) continue;
+                if (!check.result || !check.result.value) {
+                    log(`[INJECT] Context ${contextId}: no chat input found, skipping`);
+                    continue;
+                }
+
+                log(`[INJECT] Context ${contextId}: chat input found, attempting injection...`);
 
                 // If element exists, try to inject
                 const result = await this.send('Runtime.evaluate', {
@@ -345,13 +353,17 @@ export class CdpBridge {
                 if (result.result && result.result.value) {
                     const value = result.result.value;
                     if (value.ok) {
-                        log('Injection success in context', contextId);
+                        log(`[INJECT] Success in context ${contextId} via ${value.method}`);
                         return value;
                     } else if (value.reason === 'busy_cancel_visible') {
                         return { ok: false, error: 'busy' };
+                    } else {
+                        log(`[INJECT] Context ${contextId}: injection returned`, value);
                     }
                 }
-            } catch (err) { }
+            } catch (err) {
+                log(`[INJECT] Context ${contextId}: error`, err.message);
+            }
         }
         return { ok: false, error: 'not_found' };
     }

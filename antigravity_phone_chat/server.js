@@ -376,11 +376,19 @@ async function injectMessage(cdp, text) {
                         const cancel = document.querySelector('[data-tooltip-id="input-send-button-cancel-tooltip"]');
                         if (cancel && cancel.offsetParent !== null) return "busy";
                         
-                        let editor = document.querySelector('div[contenteditable="true"][role="textbox"]');
+                        // Use tight selectors: Lexical chat editor first, then role=textbox — NEVER generic [contenteditable]
+                        let editor = document.querySelector('[data-lexical-editor="true"][contenteditable="true"][role="textbox"]');
                         if (!editor) {
-                            const editables = [...document.querySelectorAll('[contenteditable="true"]')]
-                                .filter(el => el.offsetParent !== null);
-                            editor = editables.at(-1);
+                            editor = document.querySelector('div[contenteditable="true"][role="textbox"]');
+                        }
+                        if (!editor) {
+                            // Last resort: only look for contenteditable INSIDE cascade panel, not the code editor
+                            const cascadePanel = document.querySelector('#cascade, #conversation, #chat');
+                            if (cascadePanel) {
+                                const editables = [...cascadePanel.querySelectorAll('[contenteditable="true"]')]
+                                    .filter(el => el.offsetParent !== null);
+                                editor = editables.at(-1);
+                            }
                         }
                         if (!editor) return "no_editor";
                         
@@ -410,37 +418,43 @@ async function injectMessage(cdp, text) {
         return { ok: false, error: "cascade_not_found" };
     }
 
-    // Step 2: Delete any existing text via CDP keyboard events (Ctrl+A, Backspace)
+    // Step 2+3: Insert text using document.execCommand WITHIN the iframe context
+    // CRITICAL: Do NOT use Input.insertText or Input.dispatchKeyEvent — those are page-level
+    // CDP commands that target the main browser window's focused element (code editor),
+    // not the iframe's focused element (chat editor).
     try {
-        await cdp.call("Input.dispatchKeyEvent", {
-            type: "keyDown", key: "a", code: "KeyA", modifiers: 2 /* Ctrl */
-        });
-        await cdp.call("Input.dispatchKeyEvent", {
-            type: "keyUp", key: "a", code: "KeyA", modifiers: 2
-        });
-        await new Promise(r => setTimeout(r, 50));
-        await cdp.call("Input.dispatchKeyEvent", {
-            type: "keyDown", key: "Backspace", code: "Backspace"
-        });
-        await cdp.call("Input.dispatchKeyEvent", {
-            type: "keyUp", key: "Backspace", code: "Backspace"
-        });
-        await new Promise(r => setTimeout(r, 50));
-    } catch (e) { /* may fail if nothing selected */ }
+        const insertResult = await Promise.race([
+            cdp.call("Runtime.evaluate", {
+                expression: `(() => {
+                    // Re-find and focus the editor to be safe
+                    let editor = document.querySelector('[data-lexical-editor="true"][contenteditable="true"][role="textbox"]');
+                    if (!editor) editor = document.querySelector('div[contenteditable="true"][role="textbox"]');
+                    if (!editor) return { ok: false, error: "editor_lost" };
+                    
+                    editor.focus();
+                    
+                    // Select all existing text
+                    const sel = window.getSelection();
+                    if (sel) sel.selectAllChildren(editor);
+                    
+                    // Delete existing text then insert new text using execCommand
+                    // execCommand works within the iframe context, not the main page
+                    document.execCommand('delete');
+                    const inserted = document.execCommand('insertText', false, ${JSON.stringify(text)});
+                    
+                    return { ok: inserted, editorText: editor.textContent?.substring(0, 50) };
+                })()`,
+                returnByValue: true,
+                contextId: cascadeCtxId
+            }),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 5000))
+        ]);
 
-    // Step 3: Insert text using CDP Input.insertText (triggers Lexical's internal state update)
-    try {
-        await cdp.call("Input.insertText", { text });
-    } catch (e) {
-        // Fallback: type char by char via dispatchKeyEvent
-        for (const char of text) {
-            await cdp.call("Input.dispatchKeyEvent", {
-                type: "keyDown", text: char, key: char, code: ""
-            });
-            await cdp.call("Input.dispatchKeyEvent", {
-                type: "keyUp", key: char, code: ""
-            });
+        if (insertResult.result?.value?.ok === false) {
+            return { ok: false, error: insertResult.result.value.error || "insert_failed" };
         }
+    } catch (e) {
+        return { ok: false, error: "insert_exception: " + e.message };
     }
 
     // Step 4: Wait for send button to become enabled, then click it
