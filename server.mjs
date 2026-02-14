@@ -28,10 +28,10 @@ cdpBridge.onNewMessage = (msg) => {
     broadcast({ event: 'message_new', payload: msg });
 };
 
-// Start Observer periodically to catch new contexts
+// Start Observer periodically to catch new contexts (reduced from 5s to 30s — observer persists via MutationObserver)
 setInterval(() => {
     cdpBridge.startObserver();
-}, 5000);
+}, 30000);
 
 // CDP is initialized in main()
 const PORT = parseInt(process.env.PORT || '8787');
@@ -315,7 +315,7 @@ setInterval(async () => {
             console.error('[QUEUE] Error processing:', e);
         }
     }
-}, 2000); // Check every 2 seconds
+}, 5000); // Check every 5 seconds (reduced from 2s to avoid IDE contention)
 
 // --- Tab & Queue API ---
 

@@ -2050,6 +2050,86 @@ async function main() {
             res.json(result);
         });
 
+        // Approve Action - Find and click approval buttons in IDE
+        app.post('/approve-action', async (req, res) => {
+            const { buttonText } = req.body;
+            if (!cdpConnection) return res.status(503).json({ error: 'CDP disconnected' });
+
+            console.log(`[APPROVE] Looking for button: "${buttonText}"`);
+
+            const EXP = `(async () => {
+                try {
+                    const btnText = ${JSON.stringify(buttonText || 'Run')};
+                    
+                    // Strategy 1: Find buttons by exact text match
+                    const allButtons = Array.from(document.querySelectorAll('button, [role="button"]'));
+                    let target = allButtons.find(btn => {
+                        const text = (btn.innerText || btn.textContent || '').trim();
+                        return text === btnText && btn.offsetParent !== null;
+                    });
+
+                    // Strategy 2: Case-insensitive partial match
+                    if (!target) {
+                        target = allButtons.find(btn => {
+                            const text = (btn.innerText || btn.textContent || '').trim().toLowerCase();
+                            return text.includes(btnText.toLowerCase()) && btn.offsetParent !== null;
+                        });
+                    }
+
+                    // Strategy 3: Look for common action button patterns
+                    if (!target) {
+                        const actionPatterns = [
+                            'button[data-testid*="approve"]',
+                            'button[data-testid*="accept"]',
+                            'button[data-testid*="run"]',
+                            'button[data-testid*="allow"]',
+                            'button[aria-label*="Run"]',
+                            'button[aria-label*="Accept"]',
+                            'button[aria-label*="Allow"]',
+                            'button[aria-label*="Approve"]'
+                        ];
+                        for (const sel of actionPatterns) {
+                            target = document.querySelector(sel);
+                            if (target && target.offsetParent !== null) break;
+                            target = null;
+                        }
+                    }
+
+                    if (target) {
+                        target.click();
+                        return { success: true, clicked: (target.innerText || '').trim().substring(0, 50) };
+                    }
+
+                    // Debug: list visible buttons
+                    const visibleBtns = allButtons
+                        .filter(b => b.offsetParent !== null)
+                        .map(b => (b.innerText || '').trim().substring(0, 30))
+                        .filter(t => t.length > 0);
+                    return { error: 'Button not found', searched: btnText, visibleButtons: visibleBtns.slice(0, 10) };
+                } catch(e) {
+                    return { error: e.toString() };
+                }
+            })()`;
+
+            for (const ctx of cdpConnection.contexts) {
+                try {
+                    const res2 = await cdpConnection.call("Runtime.evaluate", {
+                        expression: EXP,
+                        returnByValue: true,
+                        awaitPromise: true,
+                        contextId: ctx.id
+                    });
+                    const val = res2.result?.value;
+                    if (val?.success) {
+                        console.log(`[APPROVE] ✅ Clicked: "${val.clicked}" in context ${ctx.id}`);
+                        return res.json(val);
+                    }
+                } catch (e) { }
+            }
+
+            res.json({ error: 'Button not found in any context' });
+        });
+
         // Remote Scroll - sync phone scroll to desktop
         app.post('/remote-scroll', async (req, res) => {
             const { scrollTop, scrollPercent } = req.body;

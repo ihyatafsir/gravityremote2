@@ -306,17 +306,9 @@ export class CdpBridge {
             if (result.ok) return result;
             if (result.error === 'busy') return result;
 
-            // 2. If failed, force refresh frame tree and try to find iframe
-            log(`[Retry ${i + 1}/${attempts}] Refreshing DOM tree to find chat iframe...`);
-            try {
-                // Force full deep document retrieval to populate frame Ids
-                await this.send('DOM.enable');
-                const doc = await this.send('DOM.getDocument', { depth: -1, pierce: true });
-                // We don't use 'doc' directly but this forces the browser to know about all frames
-            } catch (e) { }
-
-            // Wait briefly before retry
-            await new Promise(r => setTimeout(r, 800));
+            // 2. Lightweight retry — just wait for context events to update
+            log(`[Retry ${i + 1}/${attempts}] Waiting for contexts to refresh...`);
+            await new Promise(r => setTimeout(r, 1000));
 
             // 3. Try again with refreshed context list (which updates via events)
             result = await this.tryInjectAnyContext(text);
@@ -389,10 +381,13 @@ export class CdpBridge {
         return { ok: false };
     }
 
-    // Polling Loop for State Sync
+    // Polling Loop for State Sync (reduced from 1s to 5s to avoid IDE contention)
     startPolling(broadcastFn) {
         setInterval(async () => {
             if (!this.isConnected) return;
+
+            const contextIds = [...this.contexts.keys()];
+            if (contextIds.length === 0) return; // No contexts, skip
 
             // Check busy state
             const script = `(() => {
@@ -401,14 +396,16 @@ export class CdpBridge {
              })()`;
 
             let isBusy = false;
-            const contextIds = [...this.contexts.keys()];
             for (const contextId of contextIds.reverse()) {
                 try {
-                    const res = await this.send('Runtime.evaluate', {
-                        expression: script,
-                        contextId,
-                        returnByValue: true
-                    });
+                    const res = await Promise.race([
+                        this.send('Runtime.evaluate', {
+                            expression: script,
+                            contextId,
+                            returnByValue: true
+                        }),
+                        new Promise((_, reject) => setTimeout(() => reject(new Error('poll_timeout')), 2000))
+                    ]);
                     if (res.result && res.result.value === true) {
                         isBusy = true;
                         break;
@@ -420,7 +417,7 @@ export class CdpBridge {
                 this.lastBusyState = isBusy;
                 broadcastFn('agent_state', { busy: isBusy });
             }
-        }, 1000);
+        }, 5000);
     }
 
     // Observer for new messages
