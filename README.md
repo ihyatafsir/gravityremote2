@@ -1,74 +1,102 @@
-# GravityRemote Bridge v1.4
+# GravityRemote2
 
-Antigravity Bridge (AG Bridge) is the core connectivity layer for the **GravityRemote** mobile experience. It provides a robust WebSocket and CDP (Chrome DevTools Protocol) link between your mobile device and the Antigravity IDE.
+Mobile control interface for the **Antigravity IDE** via Chrome DevTools Protocol (CDP).
 
-## 🚀 v1.4.0 - Cross-IDE Delegation & IDE Maxxing
+## 📱 Phone Chat (Primary)
 
-This release introduces **IDE Maxxing** - advanced tools for agent-to-agent delegation and IDE control.
+The **Phone Chat** server is the main way to interact with the IDE from your mobile device. It provides a full chat interface, agent control, file uploads, and IDE shortcuts — all from your phone's browser.
 
-### New Features
+### Quick Start
 
-#### 1. 🔌 Cross-IDE Delegation
-- **HTTP Message Passing**: Send tasks between IDEs on different machines via HTTP
-- **MCP Tools**: `messages_inbox`, `messages_reply`, `messages_ack` for agent communication
-- **Remote Bridge**: Point `AG_BRIDGE_URL` to another machine's bridge for delegation
+```bash
+cd antigravity_phone_chat
+npm install
+node server.js
+```
 
-#### 2. 🚀 IDE Maxxing Tools
-- **`ide_write`**: Inject text directly into IDE chat input
-- **`ide_queue_write`**: Queue commands for when IDE is idle
-- **`focus_tab`**: Switch active tabs in the IDE programmatically
+Runs on **port 3000** by default (`PORT` env to override).
 
-#### 3. 🟢 Reliability & Hardening (v1.3)
-- **Race Condition Fix**: Solved "System Error" failures
-- **Active Frame Discovery**: Finds chat input across all iframes
-- **Auto-Retry**: 3x retry with backoff for busy IDE
+### Prerequisites
 
-#### 4. 🎨 Mobile Interface
-- **Green Theme**: Matrix-style green accent theme
-- **Chat History**: Browse past conversations from drawer
-- **New Chat**: Instant session reset button
+Start Antigravity with remote debugging enabled:
 
-## Installation & Usage
+```bash
+antigravity --remote-debugging-port=9222
+```
 
-1. **Install Dependencies**:
-   ```bash
-   npm install
-   ```
+### Features
 
-2. **Start the Bridge**:
-   ```bash
-   node server.mjs
-   ```
-   *Runs on port 8787 by default.*
+- 💬 **Chat**: Send messages to the IDE agent directly
+- 🛑 **Stop/Cancel**: Interrupt running agent tasks
+- 📎 **File Upload**: Send files to the IDE via CDP
+- 🔄 **New Chat / History**: Manage conversation sessions
+- 🎛️ **Model Switching**: Change AI model from your phone
+- 🟢 **Live Status**: Real-time busy/idle indicator via WebSocket
+- 🎨 **Matrix Green Theme**: Dark mobile-optimised UI
 
-3. **For CDP Integration** (required for IDE Maxxing):
-   ```bash
-   antigravity --remote-debugging-port=9222
-   ```
+### systemd Service
 
-## Cross-IDE Setup
+```bash
+# Enable auto-start
+systemctl --user enable antigravity-phone-chat.service
+systemctl --user start antigravity-phone-chat.service
 
-To delegate to another IDE on a different machine:
+# Check status
+systemctl --user status antigravity-phone-chat.service
+```
+
+---
+
+## ⚠️ AG Bridge (`server.mjs`) — Do NOT Run In Parallel
+
+> [!CAUTION]
+> **Do NOT run `server.mjs` (AG Bridge) alongside the Phone Chat server.**
+> Both servers connect to the same CDP port (9222) and will fight for control,
+> causing **terminal stalling**, high CPU usage, and unresponsive IDE.
+
+The AG Bridge (`server.mjs` on port 8787) was the original connectivity layer but is now superseded by the Phone Chat server. If you previously had systemd services for AG Bridge, **disable them**:
+
+```bash
+systemctl --user stop ag-bridge.service gravityremote.service
+systemctl --user disable ag-bridge.service gravityremote.service
+```
+
+---
+
+## 🔌 MCP Server
+
+The MCP (Model Context Protocol) server provides tool access for agent-to-agent communication:
+
+```bash
+node mcp-server.mjs
+```
+
+**Tools provided**: `messages_inbox`, `messages_reply`, `messages_ack`, `ide_write`, `ide_queue_write`, `focus_tab`, `get_ide_tabs`, `delegation_create/status/complete`
+
+### MCP Config
 
 ```json
-// ~/.config/antigravity/mcp-servers.json
 {
   "ag-bridge": {
     "command": "node",
     "args": ["mcp-server.mjs"],
-    "cwd": "/path/to/gravityremote2",
-    "env": {
-      "AG_BRIDGE_URL": "http://REMOTE_IP:8787"
-    }
+    "cwd": "/path/to/gravityremote2"
   }
 }
 ```
 
+---
+
 ## Architecture
-- **Server**: Node.js + Express + WebSocket
-- **Bridge**: CDP (Chrome DevTools Protocol) to IDE port 9000/9222
-- **MCP**: Model Context Protocol server for agent tools
-- **Frontend**: Vanilla HTML/JS (Mobile Optimized)
+
+| Component | Port | Purpose |
+|-----------|------|---------|
+| Phone Chat (`server.js`) | 3000 | Mobile UI + CDP bridge |
+| MCP Server (`mcp-server.mjs`) | — | Agent tools (stdio) |
+| ~~AG Bridge (`server.mjs`)~~ | ~~8787~~ | ~~Legacy — do not use~~ |
+
+**CDP Target**: Antigravity IDE on port `9222` (or `9022`)
 
 ---
-*AG Bridge v1.4.0 - IDE Maxxing Edition*
+
+*GravityRemote2 — Phone Chat Edition*

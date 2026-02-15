@@ -398,78 +398,7 @@ async function loadSnapshot() {
             '[style*="background: white"] {\n' +
             '    background-color: transparent !important;\n' +
             '}\n' +
-            '\n' +
-            '/* === Required Action Buttons - Make Visible & Tappable === */\n' +
-            '/* Target IDE approval/action buttons that appear in snapshots */\n' +
-            'button[class*="action"], button[class*="primary"], button[class*="approve"],\n' +
-            'button[class*="accept"], button[class*="run"], button[class*="allow"],\n' +
-            '[data-testid*="approve"], [data-testid*="accept"],\n' +
-            '[data-testid*="run-command"], [data-testid*="allow"] {\n' +
-            '    background: linear-gradient(135deg, #22c55e, #16a34a) !important;\n' +
-            '    color: white !important;\n' +
-            '    border: 2px solid #22c55e !important;\n' +
-            '    padding: 12px 24px !important;\n' +
-            '    border-radius: 8px !important;\n' +
-            '    font-size: 15px !important;\n' +
-            '    font-weight: 600 !important;\n' +
-            '    cursor: pointer !important;\n' +
-            '    display: inline-flex !important;\n' +
-            '    align-items: center !important;\n' +
-            '    gap: 8px !important;\n' +
-            '    min-height: 44px !important;\n' +
-            '    min-width: 120px !important;\n' +
-            '    justify-content: center !important;\n' +
-            '    box-shadow: 0 0 16px rgba(34, 197, 94, 0.4) !important;\n' +
-            '    text-shadow: none !important;\n' +
-            '    position: relative !important;\n' +
-            '    z-index: 10 !important;\n' +
-            '}\n' +
-            '\n' +
-            '/* Reject / Deny / Cancel buttons */\n' +
-            'button[class*="reject"], button[class*="deny"], button[class*="cancel"],\n' +
-            'button[class*="decline"], button[class*="secondary"],\n' +
-            '[data-testid*="reject"], [data-testid*="deny"] {\n' +
-            '    background: rgba(239, 68, 68, 0.2) !important;\n' +
-            '    color: #ef4444 !important;\n' +
-            '    border: 1px solid #ef4444 !important;\n' +
-            '    padding: 10px 20px !important;\n' +
-            '    border-radius: 8px !important;\n' +
-            '    font-size: 14px !important;\n' +
-            '    font-weight: 500 !important;\n' +
-            '    min-height: 44px !important;\n' +
-            '    position: relative !important;\n' +
-            '    z-index: 10 !important;\n' +
-            '}\n' +
-            '\n' +
-            '/* Generic visible buttons in snapshot that contain action text */\n' +
-            '.gr-action-btn {\n' +
-            '    background: linear-gradient(135deg, #22c55e, #16a34a) !important;\n' +
-            '    color: white !important;\n' +
-            '    border: 2px solid #22c55e !important;\n' +
-            '    padding: 14px 28px !important;\n' +
-            '    border-radius: 10px !important;\n' +
-            '    font-size: 16px !important;\n' +
-            '    font-weight: 700 !important;\n' +
-            '    cursor: pointer !important;\n' +
-            '    display: flex !important;\n' +
-            '    align-items: center !important;\n' +
-            '    justify-content: center !important;\n' +
-            '    gap: 8px !important;\n' +
-            '    min-height: 48px !important;\n' +
-            '    width: 100% !important;\n' +
-            '    max-width: 300px !important;\n' +
-            '    margin: 8px auto !important;\n' +
-            '    box-shadow: 0 0 20px rgba(34, 197, 94, 0.5) !important;\n' +
-            '    position: relative !important;\n' +
-            '    z-index: 10 !important;\n' +
-            '    -webkit-tap-highlight-color: rgba(34, 197, 94, 0.3) !important;\n' +
-            '    animation: action-btn-pulse 2s infinite !important;\n' +
-            '}\n' +
-            '\n' +
-            '@keyframes action-btn-pulse {\n' +
-            '    0%, 100% { box-shadow: 0 0 16px rgba(34, 197, 94, 0.4); }\n' +
-            '    50% { box-shadow: 0 0 24px rgba(34, 197, 94, 0.7); }\n' +
-            '}';
+            '';
         styleTag.textContent = darkModeOverrides;
         chatContent.innerHTML = data.html;
 
@@ -477,8 +406,7 @@ async function loadSnapshot() {
         // Add mobile copy buttons to all code blocks
         addMobileCopyButtons();
 
-        // Transform action buttons in snapshot to be visible and tappable
-        enhanceActionButtons();
+        // Action button enhancement removed — was too broad
 
         // Smart scroll behavior: respect user scroll, only auto-scroll when appropriate
         if (isUserScrollLocked) {
@@ -589,42 +517,7 @@ function addMobileCopyButtons() {
         pre.appendChild(copyBtn);
     });
 }
-// --- Enhance Action Buttons in Snapshot ---
-// Makes IDE approval/action buttons visible and tappable on mobile
-function enhanceActionButtons() {
-    const buttons = chatContent.querySelectorAll('button, [role="button"]');
-
-    buttons.forEach(btn => {
-        // Skip buttons we already enhanced or copy buttons
-        if (btn.classList.contains('gr-action-btn') || btn.classList.contains('mobile-copy-btn')) return;
-
-        const text = (btn.innerText || btn.textContent || '').trim();
-        if (!text) return;
-
-        // Match action/approval button text patterns
-        const isAction = /^(Run|Accept|Allow|Approve|Yes|OK|Confirm|Save|Apply|Execute|Continue|Proceed)$/i.test(text) ||
-            /^(Run Command|Run command|Accept All|Allow All|Accept Changes|Approve All|Auto-proceed)$/i.test(text) ||
-            btn.getAttribute('data-testid')?.match(/(approve|accept|run|allow)/i);
-
-        if (isAction) {
-            btn.classList.add('gr-action-btn');
-            btn.setAttribute('data-gr-action', text);
-            // Ensure it's visible
-            btn.style.display = 'flex';
-            btn.style.visibility = 'visible';
-            btn.style.opacity = '1';
-        }
-
-        // Also check for reject/deny buttons
-        const isReject = /^(Reject|Deny|Cancel|Decline|No|Skip|Dismiss)$/i.test(text) ||
-            btn.getAttribute('data-testid')?.match(/(reject|deny|cancel)/i);
-        if (isReject) {
-            btn.style.display = 'inline-flex';
-            btn.style.visibility = 'visible';
-            btn.style.opacity = '1';
-        }
-    });
-}
+// enhanceActionButtons removed — was matching too many unrelated IDE buttons
 
 // --- Cross-platform Clipboard Copy ---
 async function copyToClipboard(text) {

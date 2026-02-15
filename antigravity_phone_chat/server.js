@@ -17,19 +17,32 @@ import { execSync, spawn } from 'child_process';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-const PORTS = [9222, 9000, 9001, 9002, 9003];
-const POLL_INTERVAL = 3000; // 3 seconds (was 1s — too aggressive, stalls IDE terminal)
+const PORTS = [9022, 9222, 9000, 9001, 9002, 9003];
+const HEALTH_CHECK_INTERVAL = 30000; // 30s health check (reduced CDP load)
+const FALLBACK_SNAPSHOT_INTERVAL = 120000; // 120s — only if no push received
+const PUSH_FETCH_THROTTLE = 5000; // Min 5s between server-side snapshot fetches
 const SERVER_PORT = process.env.PORT || 3000;
 const APP_PASSWORD = process.env.APP_PASSWORD || 'antigravity';
 const AUTH_COOKIE_NAME = 'ag_auth_token';
-// Note: hashString is defined later, so we'll initialize the token inside createServer or use a simple string for now.
 let AUTH_TOKEN = 'ag_default_token';
-
 
 // Shared CDP connection
 let cdpConnection = null;
 let lastSnapshot = null;
 let lastSnapshotHash = null;
+
+// Performance: cache the winning context ID so we don't loop all contexts
+let cachedSnapshotCtxId = null;
+// Performance: cache CSS separately (stylesheets rarely change)
+let cachedCSS = null;
+let lastCSSRefresh = 0;
+const CSS_CACHE_TTL = 120000; // refresh CSS every 120 seconds
+
+// Push-based observer state
+let observerInjected = false;
+let lastPushTime = 0;
+let lastPushFetchTime = 0; // When we last fetched a snapshot in response to a push signal
+let pendingPushFetch = false; // Whether a throttled push fetch is scheduled
 
 // Kill any existing process on the server port (prevents EADDRINUSE)
 function killPortProcess(port) {
@@ -147,11 +160,14 @@ async function connectCDP(url) {
     });
 
     let idCounter = 1;
-    const pendingCalls = new Map(); // Track pending calls by ID
+    const pendingCalls = new Map();
     const contexts = [];
-    const CDP_CALL_TIMEOUT = 30000; // 30 seconds timeout
+    const CDP_CALL_TIMEOUT = 8000; // 8s timeout
 
-    // Single centralized message handler (fixes MaxListenersExceeded warning)
+    // The CDP object we'll return (need reference for callbacks)
+    const cdpObj = { ws, call: null, contexts, onPush: null };
+
+    // Single centralized message handler
     ws.on('message', (msg) => {
         try {
             const data = JSON.parse(msg);
@@ -161,9 +177,16 @@ async function connectCDP(url) {
                 const { resolve, reject, timeoutId } = pendingCalls.get(data.id);
                 clearTimeout(timeoutId);
                 pendingCalls.delete(data.id);
-
                 if (data.error) reject(data.error);
                 else resolve(data.result);
+            }
+
+            // Handle push snapshots from injected MutationObserver
+            if (data.method === 'Runtime.bindingCalled' && data.params?.name === 'agPushSnapshot') {
+                try {
+                    const payload = JSON.parse(data.params.payload);
+                    if (cdpObj.onPush) cdpObj.onPush(payload);
+                } catch (e) { }
             }
 
             // Handle execution context events
@@ -175,9 +198,12 @@ async function connectCDP(url) {
                 if (idx !== -1) contexts.splice(idx, 1);
             } else if (data.method === 'Runtime.executionContextsCleared') {
                 contexts.length = 0;
-                // Re-enable Runtime to force context re-enumeration
+                observerInjected = false; // Observer lost — needs re-injection
+                cachedSnapshotCtxId = null;
                 if (ws.readyState === WebSocket.OPEN) {
                     ws.send(JSON.stringify({ id: idCounter++, method: 'Runtime.enable', params: {} }));
+                    // Re-register binding after context clear
+                    ws.send(JSON.stringify({ id: idCounter++, method: 'Runtime.addBinding', params: { name: 'agPushSnapshot' } }));
                 }
             }
         } catch (e) { }
@@ -185,24 +211,53 @@ async function connectCDP(url) {
 
     const call = (method, params) => new Promise((resolve, reject) => {
         const id = idCounter++;
-
-        // Setup timeout to prevent memory leaks from never-resolved calls
         const timeoutId = setTimeout(() => {
             if (pendingCalls.has(id)) {
                 pendingCalls.delete(id);
                 reject(new Error(`CDP call ${method} timed out after ${CDP_CALL_TIMEOUT}ms`));
             }
         }, CDP_CALL_TIMEOUT);
-
         pendingCalls.set(id, { resolve, reject, timeoutId });
         ws.send(JSON.stringify({ id, method, params }));
     });
 
+    cdpObj.call = call;
+
     await call("Runtime.enable", {});
+    // Register the push binding so injected scripts can call window.agPushSnapshot()
+    try {
+        await call("Runtime.addBinding", { name: 'agPushSnapshot' });
+    } catch (e) {
+        console.warn('⚠️  Runtime.addBinding not supported, falling back to polling');
+    }
     await new Promise(r => setTimeout(r, 1000));
 
-    return { ws, call, contexts };
+    return cdpObj;
 }
+
+// Lightweight pre-check: just get innerHTML length + scroll position without cloning DOM
+const LIGHT_CHECK_SCRIPT = `(() => {
+    const cascade = document.getElementById('conversation') || document.getElementById('chat') || document.getElementById('cascade');
+    if (!cascade) return null;
+    const scrollContainer = cascade.querySelector('.overflow-y-auto, [data-scroll-area]') || cascade;
+    return {
+        len: cascade.innerHTML.length,
+        scrollTop: scrollContainer.scrollTop,
+        scrollHeight: scrollContainer.scrollHeight,
+        childCount: cascade.children.length
+    };
+})()`;
+
+// CSS-only extraction (run infrequently)
+const CSS_EXTRACT_SCRIPT = `(() => {
+    const rules = [];
+    for (const sheet of document.styleSheets) {
+        try { for (const rule of sheet.cssRules) rules.push(rule.cssText); } catch (e) { }
+    }
+    return rules.join('\\n');
+})()`;
+
+let lastLightCheck = null; // {len, scrollTop, scrollHeight, childCount}
 
 // Capture chat snapshot
 async function captureSnapshot(cdp) {
@@ -215,10 +270,69 @@ async function captureSnapshot(cdp) {
         if (cdp.contexts.length === 0) return null;
     }
 
+    // --- Step 1: Resolve which context to use (cached or scan) ---
+    let targetCtxId = null;
+
+    // Try cached context first
+    if (cachedSnapshotCtxId && cdp.contexts.some(c => c.id === cachedSnapshotCtxId)) {
+        targetCtxId = cachedSnapshotCtxId;
+    } else {
+        // Scan all contexts to find the right one (lightweight check)
+        cachedSnapshotCtxId = null;
+        for (const ctx of cdp.contexts) {
+            try {
+                const probe = await cdp.call("Runtime.evaluate", {
+                    expression: LIGHT_CHECK_SCRIPT,
+                    returnByValue: true,
+                    contextId: ctx.id
+                });
+                if (probe.result?.value && probe.result.value.len > 0) {
+                    targetCtxId = ctx.id;
+                    cachedSnapshotCtxId = ctx.id;
+                    break;
+                }
+            } catch (e) { }
+        }
+        if (!targetCtxId) return null;
+    }
+
+    // --- Step 2: Lightweight change detection (avoids heavy DOM clone if nothing changed) ---
+    try {
+        const lightRes = await cdp.call("Runtime.evaluate", {
+            expression: LIGHT_CHECK_SCRIPT,
+            returnByValue: true,
+            contextId: targetCtxId
+        });
+        const light = lightRes.result?.value;
+        if (!light) {
+            // Context went stale, invalidate cache
+            cachedSnapshotCtxId = null;
+            return null;
+        }
+
+        // If nothing changed since last check, skip the heavy snapshot entirely
+        if (lastLightCheck && lastSnapshot &&
+            light.len === lastLightCheck.len &&
+            light.childCount === lastLightCheck.childCount &&
+            light.scrollHeight === lastLightCheck.scrollHeight) {
+            // Content same — just update scroll position if it changed
+            if (light.scrollTop !== lastLightCheck.scrollTop && lastSnapshot.scrollInfo) {
+                lastSnapshot.scrollInfo.scrollTop = light.scrollTop;
+                lastSnapshot.scrollInfo.scrollPercent = light.scrollTop / (light.scrollHeight - (lastSnapshot.scrollInfo.clientHeight || 1)) || 0;
+            }
+            lastLightCheck = light;
+            return '__unchanged__'; // sentinel: tells poll loop to skip broadcast
+        }
+        lastLightCheck = light;
+    } catch (e) {
+        cachedSnapshotCtxId = null;
+        return null;
+    }
+
+    // --- Step 3: Full snapshot (only runs when content actually changed) ---
     const CAPTURE_SCRIPT = `(() => {
         const cascade = document.getElementById('conversation') || document.getElementById('chat') || document.getElementById('cascade');
         if (!cascade) {
-            // Debug info
             const body = document.body;
             const childIds = Array.from(body.children).map(c => c.id).filter(id => id).join(', ');
             return { error: 'chat container not found', debug: { hasBody: !!body, availableIds: childIds } };
@@ -226,7 +340,6 @@ async function captureSnapshot(cdp) {
         
         const cascadeStyles = window.getComputedStyle(cascade);
         
-        // Find the main scrollable container
         const scrollContainer = cascade.querySelector('.overflow-y-auto, [data-scroll-area]') || cascade;
         const scrollInfo = {
             scrollTop: scrollContainer.scrollTop,
@@ -235,12 +348,9 @@ async function captureSnapshot(cdp) {
             scrollPercent: scrollContainer.scrollTop / (scrollContainer.scrollHeight - scrollContainer.clientHeight) || 0
         };
         
-        // Clone cascade to modify it without affecting the original
         const clone = cascade.cloneNode(true);
         
-        // Aggressively remove the entire interaction/input/review area
         try {
-            // 1. Identify common interaction wrappers by class combinations
             const interactionSelectors = [
                 '.relative.flex.flex-col.gap-8',
                 '.flex.grow.flex-col.justify-start.gap-8',
@@ -253,7 +363,6 @@ async function captureSnapshot(cdp) {
             interactionSelectors.forEach(selector => {
                 clone.querySelectorAll(selector).forEach(el => {
                     try {
-                        // For the editor, we want to remove its interaction container
                         if (selector === '[contenteditable="true"]') {
                             const area = el.closest('.relative.flex.flex-col.gap-8') || 
                                          el.closest('.flex.grow.flex-col.justify-start.gap-8') ||
@@ -268,15 +377,13 @@ async function captureSnapshot(cdp) {
                 });
             });
 
-            // 2. Text-based cleanup for stray status bars
             const allElements = clone.querySelectorAll('*');
             allElements.forEach(el => {
                 try {
                     const text = (el.innerText || '').toLowerCase();
                     if (text.includes('review changes') || text.includes('files with changes') || text.includes('context found')) {
-                        // If it's a small structural element or has buttons, it's likely a bar
                         if (el.children.length < 10 || el.querySelector('button') || el.classList?.contains('justify-between')) {
-                            el.style.display = 'none'; // Use both hide and remove
+                            el.style.display = 'none';
                             el.remove();
                         }
                     }
@@ -286,69 +393,67 @@ async function captureSnapshot(cdp) {
         
         const html = clone.outerHTML;
         
-        const rules = [];
-        for (const sheet of document.styleSheets) {
-            try {
-                for (const rule of sheet.cssRules) {
-                    rules.push(rule.cssText);
-                }
-            } catch (e) { }
-        }
-        const allCSS = rules.join('\\n');
-        
         return {
             html: html,
-            css: allCSS,
             backgroundColor: cascadeStyles.backgroundColor,
             color: cascadeStyles.color,
             fontFamily: cascadeStyles.fontFamily,
             scrollInfo: scrollInfo,
             stats: {
                 nodes: clone.getElementsByTagName('*').length,
-                htmlSize: html.length,
-                cssSize: allCSS.length
+                htmlSize: html.length
             }
         };
     })()`;
 
-    let bestResult = null;
-    let bestNodes = -1;
+    try {
+        const result = await cdp.call("Runtime.evaluate", {
+            expression: CAPTURE_SCRIPT,
+            returnByValue: true,
+            contextId: targetCtxId
+        });
 
-    for (const ctx of cdp.contexts) {
-        try {
-            const result = await cdp.call("Runtime.evaluate", {
-                expression: CAPTURE_SCRIPT,
-                returnByValue: true,
-                contextId: ctx.id
-            });
-
-            if (result.exceptionDetails) {
-                continue;
-            }
-
-            if (result.result && result.result.value) {
-                const val = result.result.value;
-                if (val.error) {
-                    continue;
-                }
-                // Pick the context with the most nodes (richest content)
-                const nodes = val.stats?.nodes || 0;
-                if (nodes > bestNodes) {
-                    bestNodes = nodes;
-                    bestResult = val;
-                    // If we found substantial content, no need to check more
-                    if (nodes > 5) return bestResult;
-                }
-            }
-        } catch (e) {
-            console.log(`Context ${ctx.id} connection error:`, e.message);
+        if (result.exceptionDetails) {
+            cachedSnapshotCtxId = null;
+            return null;
         }
+
+        if (result.result?.value) {
+            const val = result.result.value;
+            if (val.error) {
+                cachedSnapshotCtxId = null;
+                return val; // pass error through
+            }
+
+            // --- Step 4: Attach CSS (from cache or fresh) ---
+            const now = Date.now();
+            if (!cachedCSS || (now - lastCSSRefresh) > CSS_CACHE_TTL) {
+                try {
+                    const cssRes = await cdp.call("Runtime.evaluate", {
+                        expression: CSS_EXTRACT_SCRIPT,
+                        returnByValue: true,
+                        contextId: targetCtxId
+                    });
+                    if (cssRes.result?.value) {
+                        cachedCSS = cssRes.result.value;
+                        lastCSSRefresh = now;
+                    }
+                } catch (e) { /* keep old cache */ }
+            }
+            val.css = cachedCSS || '';
+            if (val.stats) val.stats.cssSize = val.css.length;
+
+            return val;
+        }
+    } catch (e) {
+        console.log(`Snapshot context ${targetCtxId} error:`, e.message);
+        cachedSnapshotCtxId = null;
     }
 
-    return bestResult;
+    return null;
 }
 
-// Inject message into Antigravity
+// Inject message into Antigravity — routes through Agent Mode (Ctrl+E) to avoid terminal stalling
 async function injectMessage(cdp, text) {
     // Wait for contexts to be available (they may be briefly empty after executionContextsCleared)
     if (cdp.contexts.length === 0) {
@@ -361,8 +466,9 @@ async function injectMessage(cdp, text) {
         }
     }
 
-    // Step 1: Find the cascade-panel context and focus the editor
+    // Step 1: Find the cascade-panel context (verify it exists) and check agent mode
     let cascadeCtxId = null;
+    let alreadyInAgentMode = false;
     for (const ctx of cdp.contexts) {
         try {
             const result = await Promise.race([
@@ -376,29 +482,10 @@ async function injectMessage(cdp, text) {
                         const cancel = document.querySelector('[data-tooltip-id="input-send-button-cancel-tooltip"]');
                         if (cancel && cancel.offsetParent !== null) return "busy";
                         
-                        // Use tight selectors: Lexical chat editor first, then role=textbox — NEVER generic [contenteditable]
-                        let editor = document.querySelector('[data-lexical-editor="true"][contenteditable="true"][role="textbox"]');
-                        if (!editor) {
-                            editor = document.querySelector('div[contenteditable="true"][role="textbox"]');
-                        }
-                        if (!editor) {
-                            // Last resort: only look for contenteditable INSIDE cascade panel, not the code editor
-                            const cascadePanel = document.querySelector('#cascade, #conversation, #chat');
-                            if (cascadePanel) {
-                                const editables = [...cascadePanel.querySelectorAll('[contenteditable="true"]')]
-                                    .filter(el => el.offsetParent !== null);
-                                editor = editables.at(-1);
-                            }
-                        }
-                        if (!editor) return "no_editor";
-                        
-                        editor.focus();
-                        
-                        // Select all existing text for replacement
-                        const sel = window.getSelection();
-                        if (sel) {
-                            sel.selectAllChildren(editor);
-                        }
+                        // Check if agent mode input is already visible
+                        const editor = document.querySelector('[data-lexical-editor="true"][contenteditable="true"][role="textbox"]') ||
+                                       document.querySelector('div[contenteditable="true"][role="textbox"]');
+                        if (editor && editor.offsetParent !== null) return "agent_ready";
                         
                         return "ready";
                     })()`,
@@ -410,6 +497,7 @@ async function injectMessage(cdp, text) {
 
             const val = result.result?.value;
             if (val === "busy") return { ok: false, reason: "busy" };
+            if (val === "agent_ready") { cascadeCtxId = ctx.id; alreadyInAgentMode = true; break; }
             if (val === "ready") { cascadeCtxId = ctx.id; break; }
         } catch (e) { }
     }
@@ -418,18 +506,48 @@ async function injectMessage(cdp, text) {
         return { ok: false, error: "cascade_not_found" };
     }
 
-    // Step 2+3: Insert text using document.execCommand WITHIN the iframe context
-    // CRITICAL: Do NOT use Input.insertText or Input.dispatchKeyEvent — those are page-level
-    // CDP commands that target the main browser window's focused element (code editor),
-    // not the iframe's focused element (chat editor).
+    // Step 2: Press Ctrl+E to open Agent Mode (only if not already active)
+    if (!alreadyInAgentMode) {
+        try {
+            await cdp.call("Input.dispatchKeyEvent", {
+                type: "keyDown", key: "e", code: "KeyE",
+                modifiers: 2, // Ctrl
+                windowsVirtualKeyCode: 69, nativeVirtualKeyCode: 69
+            });
+            await cdp.call("Input.dispatchKeyEvent", {
+                type: "keyUp", key: "e", code: "KeyE",
+                modifiers: 2,
+                windowsVirtualKeyCode: 69, nativeVirtualKeyCode: 69
+            });
+            console.log('[INJECT] Sent Ctrl+E to activate agent mode');
+        } catch (e) {
+            return { ok: false, error: "ctrl_e_failed: " + e.message };
+        }
+    } else {
+        console.log('[INJECT] Agent mode already active, skipping Ctrl+E');
+    }
+
+    // Wait for agent mode input to appear
+    await new Promise(r => setTimeout(r, 800));
+
+    // Step 3: Find the editor (now in agent mode) and insert text
+    // After Ctrl+E the editor should be focused and ready for input
     try {
         const insertResult = await Promise.race([
             cdp.call("Runtime.evaluate", {
                 expression: `(() => {
-                    // Re-find and focus the editor to be safe
+                    // Re-find and focus the editor (agent mode uses the same Lexical editor)
                     let editor = document.querySelector('[data-lexical-editor="true"][contenteditable="true"][role="textbox"]');
                     if (!editor) editor = document.querySelector('div[contenteditable="true"][role="textbox"]');
-                    if (!editor) return { ok: false, error: "editor_lost" };
+                    if (!editor) {
+                        const cascadePanel = document.querySelector('#cascade, #conversation, #chat');
+                        if (cascadePanel) {
+                            const editables = [...cascadePanel.querySelectorAll('[contenteditable="true"]')]
+                                .filter(el => el.offsetParent !== null);
+                            editor = editables.at(-1);
+                        }
+                    }
+                    if (!editor) return { ok: false, error: "editor_not_found_after_ctrl_e" };
                     
                     editor.focus();
                     
@@ -442,7 +560,7 @@ async function injectMessage(cdp, text) {
                     document.execCommand('delete');
                     const inserted = document.execCommand('insertText', false, ${JSON.stringify(text)});
                     
-                    return { ok: inserted, editorText: editor.textContent?.substring(0, 50) };
+                    return { ok: inserted, editorText: editor.textContent?.substring(0, 50), mode: "agent" };
                 })()`,
                 returnByValue: true,
                 contextId: cascadeCtxId
@@ -481,7 +599,7 @@ async function injectMessage(cdp, text) {
 
                 if (submit && !submit.disabled) {
                     submit.click();
-                    return { ok: true, method: "click_submit" };
+                    return { ok: true, method: "agent_mode_submit" };
                 }
 
                 // Debug info
@@ -1412,87 +1530,259 @@ async function initCDP() {
     console.log(`✅ Connected! Found ${cdpConnection.contexts.length} execution contexts\n`);
 }
 
-// Background polling
-async function startPolling(wss) {
-    let lastErrorLog = 0;
+// Inject MutationObserver into the IDE page — pushes DOM changes to server via binding
+async function injectObserver(cdp) {
+    if (observerInjected) return true;
+    if (!cdp || cdp.contexts.length === 0) return false;
+
+    const INJECT_SCRIPT = `(function() {
+        if (window.__agObserverActive) return 'already_active';
+
+        const cascade = document.getElementById('conversation') || document.getElementById('chat') || document.getElementById('cascade');
+        if (!cascade) return 'no_container';
+
+        // Debounce timer
+        let debounceTimer = null;
+        const DEBOUNCE_MS = 500;
+
+        // LIGHTWEIGHT: Only sends a tiny signal — no DOM cloning on the IDE thread
+        function pushSignal() {
+            try {
+                window.agPushSnapshot(JSON.stringify({ changed: true, t: Date.now() }));
+            } catch (err) {
+                // Silently fail — don't crash the IDE
+            }
+        }
+
+        // MutationObserver — fires on any DOM change in the chat
+        const observer = new MutationObserver(() => {
+            clearTimeout(debounceTimer);
+            debounceTimer = setTimeout(pushSignal, DEBOUNCE_MS);
+        });
+
+        observer.observe(cascade, {
+            childList: true,
+            subtree: true,
+            characterData: true
+        });
+
+        window.__agObserverActive = true;
+        window.__agObserverDisconnect = () => { observer.disconnect(); window.__agObserverActive = false; };
+
+        // Push an initial signal immediately
+        setTimeout(pushSignal, 100);
+
+        return 'injected';
+    })()`;
+
+    // Find the right context to inject into
+    let targetCtxId = cachedSnapshotCtxId;
+
+    if (!targetCtxId || !cdp.contexts.some(c => c.id === targetCtxId)) {
+        // Scan for the correct context using a lightweight probe
+        for (const ctx of cdp.contexts) {
+            try {
+                const probe = await cdp.call("Runtime.evaluate", {
+                    expression: `!!(document.getElementById('conversation') || document.getElementById('chat') || document.getElementById('cascade'))`,
+                    returnByValue: true,
+                    contextId: ctx.id
+                });
+                if (probe.result?.value === true) {
+                    targetCtxId = ctx.id;
+                    cachedSnapshotCtxId = ctx.id;
+                    break;
+                }
+            } catch (e) { }
+        }
+    }
+
+    if (!targetCtxId) {
+        console.log('⏳ No chat container found for observer injection (IDE may still be loading)');
+        return false;
+    }
+
+    try {
+        const res = await cdp.call("Runtime.evaluate", {
+            expression: INJECT_SCRIPT,
+            returnByValue: true,
+            contextId: targetCtxId
+        });
+
+        const result = res.result?.value;
+        if (result === 'injected') {
+            observerInjected = true;
+            console.log('👁️  MutationObserver injected — push mode active');
+            return true;
+        } else if (result === 'already_active') {
+            observerInjected = true;
+            return true;
+        } else {
+            console.log(`⏳ Observer injection returned: ${result}`);
+            return false;
+        }
+    } catch (e) {
+        console.warn('⚠️  Observer injection failed:', e.message);
+        return false;
+    }
+}
+
+// Broadcast snapshot update to all connected phone clients
+function broadcastSnapshotUpdate(wss) {
+    wss.clients.forEach(client => {
+        if (client.readyState === WebSocket.OPEN) {
+            client.send(JSON.stringify({
+                type: 'snapshot_update',
+                timestamp: new Date().toISOString()
+            }));
+        }
+    });
+}
+
+// Background health-check loop (replaces heavy polling)
+// Only handles: CDP reconnection, observer injection, rare fallback snapshots
+async function startBackgroundLoop(wss) {
     let isConnecting = false;
 
-    const poll = async () => {
+    // Wire up the push handler on the CDP connection
+    // Now receives lightweight "changed" signals and fetches snapshot server-side
+    function wirePushHandler() {
+        if (!cdpConnection) return;
+        cdpConnection.onPush = (payload) => {
+            lastPushTime = Date.now();
+
+            // payload is now just { changed: true, t: ... } — a lightweight signal
+            if (!payload.changed) return;
+
+            const now = Date.now();
+            const elapsed = now - lastPushFetchTime;
+
+            if (elapsed >= PUSH_FETCH_THROTTLE) {
+                // Enough time has passed — fetch immediately
+                fetchAndBroadcastSnapshot(wss);
+            } else if (!pendingPushFetch) {
+                // Schedule a fetch after the throttle window
+                pendingPushFetch = true;
+                const delay = PUSH_FETCH_THROTTLE - elapsed;
+                setTimeout(() => {
+                    pendingPushFetch = false;
+                    fetchAndBroadcastSnapshot(wss);
+                }, delay);
+            }
+            // else: a fetch is already scheduled, skip
+        };
+    }
+
+    // Server-side snapshot fetch (runs via CDP, not in-page)
+    async function fetchAndBroadcastSnapshot(wss) {
+        if (!cdpConnection) return;
+        lastPushFetchTime = Date.now();
+        try {
+            const snapshot = await Promise.race([
+                captureSnapshot(cdpConnection),
+                new Promise(resolve => setTimeout(() => resolve(null), 6000))
+            ]);
+            if (snapshot && snapshot !== '__unchanged__' && !snapshot.error) {
+                const hash = hashString(snapshot.html);
+                if (hash !== lastSnapshotHash) {
+                    lastSnapshot = snapshot;
+                    lastSnapshotHash = hash;
+                    broadcastSnapshotUpdate(wss);
+                    console.log(`📡 Push-triggered snapshot (hash: ${hash})`);
+                }
+            }
+        } catch (e) {
+            console.error('Push-triggered snapshot error:', e.message);
+        }
+    }
+
+    // Initial wiring
+    wirePushHandler();
+
+    const healthCheck = async () => {
+        // --- 1. CDP Connection Health ---
         if (!cdpConnection || (cdpConnection.ws && cdpConnection.ws.readyState !== WebSocket.OPEN)) {
             if (!isConnecting) {
                 console.log('🔍 Looking for Antigravity CDP connection...');
                 isConnecting = true;
             }
             if (cdpConnection) {
-                // Was connected, now lost
                 console.log('🔄 CDP connection lost. Attempting to reconnect...');
                 cdpConnection = null;
+                observerInjected = false;
             }
             try {
                 await initCDP();
                 if (cdpConnection) {
-                    console.log('✅ CDP Connection established from polling loop');
+                    console.log('✅ CDP Connection established');
                     isConnecting = false;
+                    wirePushHandler();
                 }
-            } catch (err) {
-                // Not found yet, just wait for next cycle
+            } catch (err) { /* wait for next cycle */ }
+            setTimeout(healthCheck, 10000); // 10s reconnect retry (was 3s)
+            return;
+        }
+
+        // --- 2. Observer Injection ---
+        if (!observerInjected) {
+            try {
+                await injectObserver(cdpConnection);
+            } catch (e) {
+                console.warn('Observer injection attempt failed:', e.message);
             }
-            setTimeout(poll, 2000); // Try again in 2 seconds if not found
-            return;
         }
 
-        // Skip heavy snapshot if no phone clients are connected — no point blocking IDE
-        const hasClients = wss.clients.size > 0;
-        if (!hasClients) {
-            setTimeout(poll, POLL_INTERVAL * 2); // Even slower when nobody's watching
-            return;
-        }
-
-        try {
-            const snapshot = await captureSnapshot(cdpConnection);
-            if (snapshot && !snapshot.error) {
-                const hash = hashString(snapshot.html);
-
-                // Only update if content changed
-                if (hash !== lastSnapshotHash) {
-                    lastSnapshot = snapshot;
-                    lastSnapshotHash = hash;
-
-                    // Broadcast to all connected clients
-                    wss.clients.forEach(client => {
-                        if (client.readyState === WebSocket.OPEN) {
-                            client.send(JSON.stringify({
-                                type: 'snapshot_update',
-                                timestamp: new Date().toISOString()
-                            }));
-                        }
+        // --- 3. CSS Cache Refresh (infrequent, lightweight) ---
+        const now = Date.now();
+        if (!cachedCSS || (now - lastCSSRefresh) > CSS_CACHE_TTL) {
+            try {
+                const ctxId = cachedSnapshotCtxId || cdpConnection.contexts[0]?.id;
+                if (ctxId) {
+                    const cssRes = await cdpConnection.call("Runtime.evaluate", {
+                        expression: CSS_EXTRACT_SCRIPT,
+                        returnByValue: true,
+                        contextId: ctxId
                     });
-
-                    console.log(`📸 Snapshot updated(hash: ${hash})`);
-                }
-            } else {
-                // Snapshot is null or has error
-                const now = Date.now();
-                if (!lastErrorLog || now - lastErrorLog > 10000) {
-                    const errorMsg = snapshot?.error || 'No valid snapshot captured (check contexts)';
-                    console.warn(`⚠️  Snapshot capture issue: ${errorMsg} `);
-                    if (errorMsg.includes('container not found')) {
-                        console.log('   (Tip: Ensure an active chat is open in Antigravity)');
+                    if (cssRes.result?.value) {
+                        cachedCSS = cssRes.result.value;
+                        lastCSSRefresh = now;
+                        // Update existing snapshot CSS if we have one
+                        if (lastSnapshot) {
+                            lastSnapshot.css = cachedCSS;
+                            if (lastSnapshot.stats) lastSnapshot.stats.cssSize = cachedCSS.length;
+                        }
                     }
-                    if (cdpConnection.contexts.length === 0) {
-                        console.log('   (Tip: No active execution contexts found. Try interacting with the Antigravity window)');
-                    }
-                    lastErrorLog = now;
                 }
-            }
-        } catch (err) {
-            console.error('Poll error:', err.message);
+            } catch (e) { /* keep old cache */ }
         }
 
-        setTimeout(poll, POLL_INTERVAL);
+        // --- 4. Fallback: if no push received in 30s and clients connected, do ONE snapshot ---
+        const hasClients = wss.clients.size > 0;
+        if (hasClients && (now - lastPushTime) > FALLBACK_SNAPSHOT_INTERVAL && observerInjected) {
+            console.log('⚡ Fallback snapshot (no push received in 30s)');
+            try {
+                const snapshot = await Promise.race([
+                    captureSnapshot(cdpConnection),
+                    new Promise(resolve => setTimeout(() => resolve(null), 6000))
+                ]);
+                if (snapshot && snapshot !== '__unchanged__' && !snapshot.error) {
+                    const hash = hashString(snapshot.html);
+                    if (hash !== lastSnapshotHash) {
+                        lastSnapshot = snapshot;
+                        lastSnapshotHash = hash;
+                        broadcastSnapshotUpdate(wss);
+                        console.log(`📸 Fallback snapshot updated (hash: ${hash})`);
+                    }
+                }
+                lastPushTime = now; // Reset timer even if unchanged
+            } catch (e) {
+                console.error('Fallback snapshot error:', e.message);
+            }
+        }
+
+        setTimeout(healthCheck, HEALTH_CHECK_INTERVAL);
     };
 
-    poll();
+    healthCheck();
 }
 
 // Create Express app
@@ -1762,12 +2052,23 @@ async function createServer() {
                 cdpConnection = null;
             }
 
-            // Kill all antigravity processes
+            // Kill all antigravity processes EXCEPT this server
+            const myPid = process.pid;
             try {
-                execSync('pkill -f antigravity || true', { stdio: 'pipe' });
-                console.log('  ✅ Killed antigravity processes');
+                // pgrep -f antigravity returns PIDs separated by newlines
+                const pids = execSync('pgrep -f "antigravity" || true', { encoding: 'utf8' }).trim().split('\n');
+
+                // Filter out empty strings and our own PID
+                const toKill = pids.filter(pid => pid && pid.trim().length > 0 && pid.trim() !== String(myPid));
+
+                if (toKill.length > 0) {
+                    execSync(`kill ${toKill.join(' ')}`, { stdio: 'pipe' });
+                    console.log(`  ✅ Killed antigravity processes: ${toKill.join(', ')}`);
+                } else {
+                    console.log('  ⚠️  No other antigravity processes found');
+                }
             } catch (e) {
-                console.log('  ⚠️  No antigravity processes found or kill failed');
+                console.log('  ⚠️  Error killing processes:', e.message);
             }
 
             // Wait for processes to die
@@ -2060,8 +2361,8 @@ async function main() {
     try {
         const { server, wss, app, hasSSL } = await createServer();
 
-        // Start background polling (it will now handle reconnections)
-        startPolling(wss);
+        // Start push-based background loop (health-check + observer injection)
+        startBackgroundLoop(wss);
 
         // Remote Click
         app.post('/remote-click', async (req, res) => {
@@ -2170,6 +2471,27 @@ async function main() {
         app.post('/new-chat', async (req, res) => {
             if (!cdpConnection) return res.status(503).json({ error: 'CDP disconnected' });
             const result = await startNewChat(cdpConnection);
+
+            // After creating new chat, activate agent mode with Ctrl+E
+            if (result.success) {
+                await new Promise(r => setTimeout(r, 1000)); // Wait for chat to initialize
+                try {
+                    await cdpConnection.call("Input.dispatchKeyEvent", {
+                        type: "keyDown", key: "e", code: "KeyE",
+                        modifiers: 2, windowsVirtualKeyCode: 69, nativeVirtualKeyCode: 69
+                    });
+                    await cdpConnection.call("Input.dispatchKeyEvent", {
+                        type: "keyUp", key: "e", code: "KeyE",
+                        modifiers: 2, windowsVirtualKeyCode: 69, nativeVirtualKeyCode: 69
+                    });
+                    console.log('[NEW-CHAT] ✅ Sent Ctrl+E to activate agent mode');
+                    result.agentMode = true;
+                } catch (e) {
+                    console.warn('[NEW-CHAT] ⚠️ Ctrl+E failed:', e.message);
+                    result.agentMode = false;
+                }
+            }
+
             res.json(result);
         });
 
