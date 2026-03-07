@@ -703,9 +703,12 @@ async function sendMessage() {
             }
         }
 
-        // Always reload snapshot to check if message appeared
+        // Burst snapshot fetches — show agent "running" state quickly
         setTimeout(loadSnapshot, 300);
         setTimeout(loadSnapshot, 800);
+        setTimeout(loadSnapshot, 2000);
+        setTimeout(loadSnapshot, 4000);
+        setTimeout(loadSnapshot, 7000);
         setTimeout(checkChatStatus, 1000);
     } catch (e) {
         // Network error - still try to refresh in case it went through

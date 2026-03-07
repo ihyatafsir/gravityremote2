@@ -20,7 +20,7 @@ const __dirname = dirname(__filename);
 const PORTS = [9022, 9222, 9000, 9001, 9002, 9003];
 const HEALTH_CHECK_INTERVAL = 30000; // 30s health check (reduced CDP load)
 const FALLBACK_SNAPSHOT_INTERVAL = 120000; // 120s — only if no push received
-const PUSH_FETCH_THROTTLE = 5000; // Min 5s between server-side snapshot fetches
+const PUSH_FETCH_THROTTLE = 2000; // Min 2s between server-side snapshot fetches (snappier updates)
 const SERVER_PORT = process.env.PORT || 3000;
 const APP_PASSWORD = process.env.APP_PASSWORD || 'antigravity';
 const AUTH_COOKIE_NAME = 'ag_auth_token';
@@ -500,6 +500,22 @@ async function captureSnapshot(cdp) {
         };
         
         const clone = cascade.cloneNode(true);
+        
+        // --- Trim old messages to save phone RAM ---
+        // Keep only the last ~50 direct children (message blocks)
+        const MAX_CHILDREN = 50;
+        const children = Array.from(clone.children);
+        if (children.length > MAX_CHILDREN) {
+            const toRemove = children.length - MAX_CHILDREN;
+            for (let i = 0; i < toRemove; i++) {
+                clone.removeChild(children[i]);
+            }
+            // Add a small indicator that older messages were trimmed
+            const trimNote = document.createElement('div');
+            trimNote.style.cssText = 'text-align:center;padding:8px;color:#666;font-size:12px;border-bottom:1px solid #333;margin-bottom:8px;';
+            trimNote.textContent = '⬆ ' + toRemove + ' earlier messages not shown (scroll on desktop to see)';
+            clone.insertBefore(trimNote, clone.firstChild);
+        }
         
         try {
             const interactionSelectors = [
