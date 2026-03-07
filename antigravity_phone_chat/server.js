@@ -28,21 +28,32 @@ let AUTH_TOKEN = 'ag_default_token';
 
 // Shared CDP connection
 let cdpConnection = null;
+let cdpKeepAliveTimer = null;
+let reconnectAttempts = 0;
+const RECONNECT_BASE_MS = 3000;
+const RECONNECT_MAX_MS = 30000;
 let lastSnapshot = null;
 let lastSnapshotHash = null;
 
 // Performance: cache the winning context ID so we don't loop all contexts
 let cachedSnapshotCtxId = null;
+let cachedCascadeCtxId = null; // Cache for injectMessage cascade context
 // Performance: cache CSS separately (stylesheets rarely change)
 let cachedCSS = null;
 let lastCSSRefresh = 0;
 const CSS_CACHE_TTL = 120000; // refresh CSS every 120 seconds
+const CSS_MAX_SIZE = 200000; // Cap CSS at 200KB to prevent phone stalling
 
 // Push-based observer state
 let observerInjected = false;
 let lastPushTime = 0;
 let lastPushFetchTime = 0; // When we last fetched a snapshot in response to a push signal
 let pendingPushFetch = false; // Whether a throttled push fetch is scheduled
+
+// Message queue — holds messages when agent is busy (terminal running)
+const messageQueue = [];
+const MAX_QUEUED_MESSAGES = 5;
+let isProcessingQueue = false;
 
 // Kill any existing process on the server port (prevents EADDRINUSE)
 function killPortProcess(port) {
@@ -167,6 +178,25 @@ async function connectCDP(url) {
     // The CDP object we'll return (need reference for callbacks)
     const cdpObj = { ws, call: null, contexts, onPush: null };
 
+    // --- WebSocket close/error handlers for immediate reconnect ---
+    ws.on('close', (code, reason) => {
+        console.log(`🔌 CDP WebSocket closed (code: ${code}, reason: ${reason || 'none'})`);
+        if (cdpConnection === cdpObj) {
+            cdpConnection = null;
+            observerInjected = false;
+            cachedSnapshotCtxId = null;
+        }
+        stopCdpKeepAlive();
+    });
+
+    ws.on('error', (err) => {
+        console.error(`❌ CDP WebSocket error: ${err.message}`);
+        // 'close' event will fire after this, which handles cleanup
+    });
+
+    // --- Keepalive: ping every 15s, detect dead sockets ---
+    startCdpKeepAlive(ws);
+
     // Single centralized message handler
     ws.on('message', (msg) => {
         try {
@@ -210,6 +240,9 @@ async function connectCDP(url) {
     });
 
     const call = (method, params) => new Promise((resolve, reject) => {
+        if (ws.readyState !== WebSocket.OPEN) {
+            return reject(new Error(`CDP WebSocket not open (state: ${ws.readyState})`));
+        }
         const id = idCounter++;
         const timeoutId = setTimeout(() => {
             if (pendingCalls.has(id)) {
@@ -235,6 +268,109 @@ async function connectCDP(url) {
     return cdpObj;
 }
 
+// --- CDP WebSocket keepalive ---
+function startCdpKeepAlive(ws) {
+    stopCdpKeepAlive();
+    let pongReceived = true;
+
+    ws.on('pong', () => { pongReceived = true; });
+
+    cdpKeepAliveTimer = setInterval(() => {
+        if (ws.readyState !== WebSocket.OPEN) {
+            stopCdpKeepAlive();
+            return;
+        }
+        if (!pongReceived) {
+            console.warn('💀 CDP keepalive: no pong received, terminating dead socket');
+            ws.terminate(); // Force-close — triggers 'close' event
+            stopCdpKeepAlive();
+            return;
+        }
+        pongReceived = false;
+        ws.ping();
+    }, 15000); // Ping every 15s
+}
+
+function stopCdpKeepAlive() {
+    if (cdpKeepAliveTimer) {
+        clearInterval(cdpKeepAliveTimer);
+        cdpKeepAliveTimer = null;
+    }
+}
+
+// --- Proactive CDP reconnection helper ---
+// Call this from endpoints instead of returning 503 immediately.
+// Attempts a quick reconnect before giving up.
+let _ensureCdpPromise = null;
+async function ensureCDP() {
+    if (cdpConnection && cdpConnection.ws?.readyState === WebSocket.OPEN) {
+        return true; // Already connected
+    }
+    // Avoid multiple concurrent reconnection attempts
+    if (_ensureCdpPromise) return _ensureCdpPromise;
+
+    _ensureCdpPromise = (async () => {
+        console.log('🔄 ensureCDP: attempting quick reconnect...');
+        try {
+            await initCDP();
+            if (cdpConnection) {
+                console.log('✅ ensureCDP: reconnected!');
+                reconnectAttempts = 0;
+                return true;
+            }
+        } catch (e) {
+            console.warn(`⚠️ ensureCDP: reconnect failed: ${e.message}`);
+        }
+        return false;
+    })();
+
+    try {
+        return await _ensureCdpPromise;
+    } finally {
+        _ensureCdpPromise = null;
+    }
+}
+
+// Lightweight "is agent busy?" probe — only checks the cancel button, no inject attempt
+// Returns true if agent is busy (cancel button visible), false if idle
+async function isAgentBusy(cdp) {
+    if (!cdp || cdp.ws?.readyState !== WebSocket.OPEN) return true; // Assume busy if no connection
+
+    // Try cached cascade context first, then scan up to 2
+    const ctxIds = [];
+    if (cachedCascadeCtxId && cdp.contexts.some(c => c.id === cachedCascadeCtxId)) {
+        ctxIds.push(cachedCascadeCtxId);
+    }
+    for (const ctx of cdp.contexts) {
+        if (ctx.origin?.includes('extension') || ctx.name?.includes('worker')) continue;
+        if (!ctxIds.includes(ctx.id)) ctxIds.push(ctx.id);
+        if (ctxIds.length >= 2) break;
+    }
+
+    for (const ctxId of ctxIds) {
+        try {
+            const result = await Promise.race([
+                cdp.call("Runtime.evaluate", {
+                    expression: `(() => {
+                        const cancel = document.querySelector('[data-tooltip-id="input-send-button-cancel-tooltip"]');
+                        if (cancel && cancel.offsetParent !== null) return "busy";
+                        const editor = document.querySelector('[data-lexical-editor="true"][contenteditable="true"][role="textbox"]');
+                        if (editor && editor.offsetParent !== null) return "idle";
+                        return "unknown";
+                    })()`,
+                    returnByValue: true,
+                    contextId: ctxId
+                }),
+                new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 1500))
+            ]);
+            const val = result.result?.value;
+            if (val === "busy") return true;
+            if (val === "idle") return false;
+        } catch (e) { /* try next context */ }
+    }
+    return true; // Unknown = assume busy
+}
+
 // Lightweight pre-check: just get innerHTML length + scroll position without cloning DOM
 const LIGHT_CHECK_SCRIPT = `(() => {
     const cascade = document.getElementById('conversation') || document.getElementById('chat') || document.getElementById('cascade');
@@ -251,8 +387,23 @@ const LIGHT_CHECK_SCRIPT = `(() => {
 // CSS-only extraction (run infrequently)
 const CSS_EXTRACT_SCRIPT = `(() => {
     const rules = [];
+    let totalSize = 0;
+    const MAX_CSS = 200000; // 200KB cap
+    const seen = new Set();
     for (const sheet of document.styleSheets) {
-        try { for (const rule of sheet.cssRules) rules.push(rule.cssText); } catch (e) { }
+        try {
+            for (const rule of sheet.cssRules) {
+                const text = rule.cssText;
+                // Deduplicate and skip huge rules
+                if (text.length > 5000) continue;
+                if (seen.has(text)) continue;
+                seen.add(text);
+                totalSize += text.length;
+                if (totalSize > MAX_CSS) break;
+                rules.push(text);
+            }
+        } catch (e) { }
+        if (totalSize > MAX_CSS) break;
     }
     return rules.join('\\n');
 })()`;
@@ -453,23 +604,31 @@ async function captureSnapshot(cdp) {
     return null;
 }
 
-// Inject message into Antigravity — routes through Agent Mode (Ctrl+E) to avoid terminal stalling
+// Inject message into Antigravity — routes through Agent Mode (Ctrl+E)
+// Heavily optimized: cached context, 2s timeouts, 12s overall limit
 async function injectMessage(cdp, text) {
-    // Wait for contexts to be available (they may be briefly empty after executionContextsCleared)
+    // Overall timeout: never let this function hang > 12s
+    return Promise.race([
+        _injectMessageInner(cdp, text),
+        new Promise(resolve => setTimeout(() => resolve({ ok: false, error: 'inject_timeout_12s' }), 12000))
+    ]);
+}
+
+async function _injectMessageInner(cdp, text) {
+    // Wait for contexts (brief)
     if (cdp.contexts.length === 0) {
-        for (let wait = 0; wait < 5; wait++) {
-            await new Promise(r => setTimeout(r, 500));
-            if (cdp.contexts.length > 0) break;
-        }
+        await new Promise(r => setTimeout(r, 500));
         if (cdp.contexts.length === 0) {
             return { ok: false, error: 'no_contexts_available' };
         }
     }
 
-    // Step 1: Find the cascade-panel context (verify it exists) and check agent mode
+    // Step 1: Find cascade context (use cache first, then scan max 3)
     let cascadeCtxId = null;
     let alreadyInAgentMode = false;
-    for (const ctx of cdp.contexts) {
+
+    // Try cached context first (instant)
+    if (cachedCascadeCtxId && cdp.contexts.some(c => c.id === cachedCascadeCtxId)) {
         try {
             const result = await Promise.race([
                 cdp.call("Runtime.evaluate", {
@@ -478,65 +637,90 @@ async function injectMessage(cdp, text) {
                                           document.querySelector('[data-tooltip-id="new-conversation-tooltip"]') ||
                                           document.querySelector('[data-tooltip-id="history-tooltip"]');
                         if (!isCascade) return "wrong_context";
-                        
                         const cancel = document.querySelector('[data-tooltip-id="input-send-button-cancel-tooltip"]');
                         if (cancel && cancel.offsetParent !== null) return "busy";
-                        
-                        // Check if agent mode input is already visible
                         const editor = document.querySelector('[data-lexical-editor="true"][contenteditable="true"][role="textbox"]') ||
                                        document.querySelector('div[contenteditable="true"][role="textbox"]');
                         if (editor && editor.offsetParent !== null) return "agent_ready";
-                        
                         return "ready";
                     })()`,
                     returnByValue: true,
-                    contextId: ctx.id
+                    contextId: cachedCascadeCtxId
                 }),
-                new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 5000))
+                new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 2000))
             ]);
-
             const val = result.result?.value;
             if (val === "busy") return { ok: false, reason: "busy" };
-            if (val === "agent_ready") { cascadeCtxId = ctx.id; alreadyInAgentMode = true; break; }
-            if (val === "ready") { cascadeCtxId = ctx.id; break; }
-        } catch (e) { }
+            if (val === "agent_ready") { cascadeCtxId = cachedCascadeCtxId; alreadyInAgentMode = true; }
+            else if (val === "ready") { cascadeCtxId = cachedCascadeCtxId; }
+            else { cachedCascadeCtxId = null; } // Cache invalid
+        } catch (e) { cachedCascadeCtxId = null; }
+    }
+
+    // Scan contexts if cache missed (limit to 3, skip obviously-wrong ones)
+    if (!cascadeCtxId) {
+        let scanned = 0;
+        for (const ctx of cdp.contexts) {
+            // Skip extension/worker contexts
+            if (ctx.origin?.includes('extension') || ctx.name?.includes('worker')) continue;
+            if (scanned++ >= 3) break; // Max 3 context probes
+            try {
+                const result = await Promise.race([
+                    cdp.call("Runtime.evaluate", {
+                        expression: `(() => {
+                            const isCascade = document.querySelector('[data-tooltip-id="cascade-header-menu"]') ||
+                                              document.querySelector('[data-tooltip-id="new-conversation-tooltip"]') ||
+                                              document.querySelector('[data-tooltip-id="history-tooltip"]');
+                            if (!isCascade) return "wrong_context";
+                            const cancel = document.querySelector('[data-tooltip-id="input-send-button-cancel-tooltip"]');
+                            if (cancel && cancel.offsetParent !== null) return "busy";
+                            const editor = document.querySelector('[data-lexical-editor="true"][contenteditable="true"][role="textbox"]') ||
+                                           document.querySelector('div[contenteditable="true"][role="textbox"]');
+                            if (editor && editor.offsetParent !== null) return "agent_ready";
+                            return "ready";
+                        })()`,
+                        returnByValue: true,
+                        contextId: ctx.id
+                    }),
+                    new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 2000))
+                ]);
+                const val = result.result?.value;
+                if (val === "busy") { cachedCascadeCtxId = ctx.id; return { ok: false, reason: "busy" }; }
+                if (val === "agent_ready") { cascadeCtxId = ctx.id; cachedCascadeCtxId = ctx.id; alreadyInAgentMode = true; break; }
+                if (val === "ready") { cascadeCtxId = ctx.id; cachedCascadeCtxId = ctx.id; break; }
+            } catch (e) { }
+        }
     }
 
     if (!cascadeCtxId) {
         return { ok: false, error: "cascade_not_found" };
     }
 
-    // Step 2: Press Ctrl+E to open Agent Mode (only if not already active)
+    // Step 2: Ctrl+E for agent mode (only if needed)
     if (!alreadyInAgentMode) {
         try {
             await cdp.call("Input.dispatchKeyEvent", {
                 type: "keyDown", key: "e", code: "KeyE",
-                modifiers: 2, // Ctrl
-                windowsVirtualKeyCode: 69, nativeVirtualKeyCode: 69
+                modifiers: 2, windowsVirtualKeyCode: 69, nativeVirtualKeyCode: 69
             });
             await cdp.call("Input.dispatchKeyEvent", {
                 type: "keyUp", key: "e", code: "KeyE",
-                modifiers: 2,
-                windowsVirtualKeyCode: 69, nativeVirtualKeyCode: 69
+                modifiers: 2, windowsVirtualKeyCode: 69, nativeVirtualKeyCode: 69
             });
-            console.log('[INJECT] Sent Ctrl+E to activate agent mode');
+            console.log('[INJECT] Sent Ctrl+E');
         } catch (e) {
             return { ok: false, error: "ctrl_e_failed: " + e.message };
         }
-    } else {
-        console.log('[INJECT] Agent mode already active, skipping Ctrl+E');
     }
 
-    // Wait for agent mode input to appear
-    await new Promise(r => setTimeout(r, 800));
+    // Wait for agent mode (reduced from 800ms)
+    await new Promise(r => setTimeout(r, 400));
 
-    // Step 3: Find the editor (now in agent mode) and insert text
-    // After Ctrl+E the editor should be focused and ready for input
+    // Step 3: Focus editor and type
     try {
-        const insertResult = await Promise.race([
+        const focusResult = await Promise.race([
             cdp.call("Runtime.evaluate", {
                 expression: `(() => {
-                    // Re-find and focus the editor (agent mode uses the same Lexical editor)
                     let editor = document.querySelector('[data-lexical-editor="true"][contenteditable="true"][role="textbox"]');
                     if (!editor) editor = document.querySelector('div[contenteditable="true"][role="textbox"]');
                     if (!editor) {
@@ -547,77 +731,67 @@ async function injectMessage(cdp, text) {
                             editor = editables.at(-1);
                         }
                     }
-                    if (!editor) return { ok: false, error: "editor_not_found_after_ctrl_e" };
-                    
+                    if (!editor) return { ok: false, error: "editor_not_found" };
                     editor.focus();
-                    
-                    // Select all existing text
                     const sel = window.getSelection();
                     if (sel) sel.selectAllChildren(editor);
-                    
-                    // Delete existing text then insert new text using execCommand
-                    // execCommand works within the iframe context, not the main page
                     document.execCommand('delete');
-                    const inserted = document.execCommand('insertText', false, ${JSON.stringify(text)});
-                    
-                    return { ok: inserted, editorText: editor.textContent?.substring(0, 50), mode: "agent" };
+                    return { ok: true };
                 })()`,
                 returnByValue: true,
                 contextId: cascadeCtxId
             }),
-            new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 5000))
+            new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 2000))
         ]);
 
-        if (insertResult.result?.value?.ok === false) {
-            return { ok: false, error: insertResult.result.value.error || "insert_failed" };
+        if (focusResult.result?.value?.ok === false) {
+            return { ok: false, error: focusResult.result.value.error || "focus_failed" };
         }
+
+        await cdp.call("Input.insertText", { text });
+        console.log('[INJECT] Typed text');
+
+        await new Promise(r => setTimeout(r, 200));
     } catch (e) {
         return { ok: false, error: "insert_exception: " + e.message };
     }
 
-    // Step 4: Wait for send button to become enabled, then click it
-    await new Promise(r => setTimeout(r, 500));
+    // Step 4: Click send button (reduced timeout from 8s to 3s)
+    await new Promise(r => setTimeout(r, 300));
 
-    const clickResult = await Promise.race([
-        cdp.call("Runtime.evaluate", {
-            expression: `(async () => {
-                // Wait and retry for the send button to be enabled
-                let submit = null;
-                for (let retry = 0; retry < 5; retry++) {
-                    submit = document.querySelector('[data-tooltip-id="input-send-button-send-tooltip"]');
-                    if (submit && !submit.disabled) break;
-                    submit = document.querySelector("svg.lucide-arrow-right")?.closest("button");
-                    if (submit && !submit.disabled) break;
-                    
-                    // Also check pending button that's NOT disabled
-                    submit = document.querySelector('[data-tooltip-id="input-send-button-pending-tooltip"]');
-                    if (submit && !submit.disabled) break;
-                    
-                    submit = null;
-                    await new Promise(r => setTimeout(r, 200));
-                }
+    try {
+        const clickResult = await Promise.race([
+            cdp.call("Runtime.evaluate", {
+                expression: `(async () => {
+                    let submit = null;
+                    for (let retry = 0; retry < 4; retry++) {
+                        submit = document.querySelector('[data-tooltip-id="input-send-button-send-tooltip"]');
+                        if (submit && !submit.disabled) break;
+                        submit = document.querySelector("svg.lucide-arrow-right")?.closest("button");
+                        if (submit && !submit.disabled) break;
+                        submit = document.querySelector('[data-tooltip-id="input-send-button-pending-tooltip"]');
+                        if (submit && !submit.disabled) break;
+                        submit = null;
+                        await new Promise(r => setTimeout(r, 150));
+                    }
+                    if (submit && !submit.disabled) {
+                        submit.click();
+                        return { ok: true, method: "agent_mode_submit" };
+                    }
+                    return { ok: false, error: "send_btn_not_found" };
+                })()`,
+                returnByValue: true,
+                awaitPromise: true,
+                contextId: cascadeCtxId
+            }),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 3000))
+        ]);
 
-                if (submit && !submit.disabled) {
-                    submit.click();
-                    return { ok: true, method: "agent_mode_submit" };
-                }
-
-                // Debug info
-                const tips = [...document.querySelectorAll("[data-tooltip-id]")]
-                    .map(el => el.getAttribute("data-tooltip-id") + ":dis=" + el.disabled)
-                    .filter(t => t.includes("send"));
-                const edText = document.querySelector('div[contenteditable="true"][role="textbox"]')?.textContent?.substring(0,40) || "no-editor";
-                return { ok: false, error: "send_btn_disabled", debug: { tips, edText } };
-            })()`,
-            returnByValue: true,
-            awaitPromise: true,
-            contextId: cascadeCtxId
-        }),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 8000))
-    ]);
-
-    if (clickResult.result?.value) {
-        return clickResult.result.value;
+        if (clickResult.result?.value) {
+            return clickResult.result.value;
+        }
+    } catch (e) {
+        return { ok: false, error: "click_timeout: " + e.message };
     }
 
     return { ok: false, error: "click_failed" };
@@ -1022,71 +1196,35 @@ async function setModel(cdp, modelName) {
     return bestResult || { error: 'Context failed' };
 }
 
-// Start New Chat - Click the + button at the TOP of the chat window (NOT the context/media + button)
+// Start New Chat - Use Agent Manager Shortcut Ctrl+L
 async function startNewChat(cdp) {
-    const EXP = `(async () => {
-        try {
-            // Priority 1: Exact selector from user (data-tooltip-id="new-conversation-tooltip")
-            const exactBtn = document.querySelector('[data-tooltip-id="new-conversation-tooltip"]');
-            if (exactBtn) {
-                exactBtn.click();
-                return { success: true, method: 'data-tooltip-id' };
-            }
-
-            // Fallback: Use previous heuristics
-            const allButtons = Array.from(document.querySelectorAll('button, [role="button"], a'));
-            
-            // Find all buttons with plus icons
-            const plusButtons = allButtons.filter(btn => {
-                if (btn.offsetParent === null) return false; // Skip hidden
-                const hasPlusIcon = btn.querySelector('svg.lucide-plus') || 
-                                   btn.querySelector('svg.lucide-square-plus') ||
-                                   btn.querySelector('svg[class*="plus"]');
-                return hasPlusIcon;
-            });
-            
-            // Filter only top buttons (toolbar area)
-            const topPlusButtons = plusButtons.filter(btn => {
-                const rect = btn.getBoundingClientRect();
-                return rect.top < 200;
-            });
-
-            if (topPlusButtons.length > 0) {
-                 topPlusButtons.sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top);
-                 topPlusButtons[0].click();
-                 return { success: true, method: 'filtered_top_plus', count: topPlusButtons.length };
-            }
-            
-            // Fallback: aria-label
-             const newChatBtn = allButtons.find(btn => {
-                const ariaLabel = btn.getAttribute('aria-label')?.toLowerCase() || '';
-                const title = btn.getAttribute('title')?.toLowerCase() || '';
-                return (ariaLabel.includes('new') || title.includes('new')) && btn.offsetParent !== null;
-            });
-            
-            if (newChatBtn) {
-                newChatBtn.click();
-                return { success: true, method: 'aria_label_new' };
-            }
-            
-            return { error: 'New chat button not found' };
-        } catch(e) {
-            return { error: e.toString() };
-        }
-    })()`;
-
-    for (const ctx of cdp.contexts) {
-        try {
-            const res = await cdp.call("Runtime.evaluate", {
-                expression: EXP,
-                returnByValue: true,
-                awaitPromise: true,
-                contextId: ctx.id
-            });
-            if (res.result?.value?.success) return res.result.value;
-        } catch (e) { }
+    try {
+        console.log('[NEW-CHAT] ⌨️ Sending Ctrl+L to trigger new Agent Chat');
+        // Press Ctrl
+        await cdp.call("Input.dispatchKeyEvent", {
+            type: "keyDown", key: "Control", code: "ControlLeft",
+            modifiers: 2, windowsVirtualKeyCode: 17, nativeVirtualKeyCode: 17
+        });
+        // Press E
+        await cdp.call("Input.dispatchKeyEvent", {
+            type: "keyDown", key: "e", code: "KeyE",
+            modifiers: 2, windowsVirtualKeyCode: 69, nativeVirtualKeyCode: 69
+        });
+        // Release E
+        await cdp.call("Input.dispatchKeyEvent", {
+            type: "keyUp", key: "e", code: "KeyE",
+            modifiers: 2, windowsVirtualKeyCode: 69, nativeVirtualKeyCode: 69
+        });
+        // Release Ctrl
+        await cdp.call("Input.dispatchKeyEvent", {
+            type: "keyUp", key: "Control", code: "ControlLeft",
+            modifiers: 0, windowsVirtualKeyCode: 17, nativeVirtualKeyCode: 17
+        });
+        return { success: true, method: 'cdp_shortcut_ctrl_l' };
+    } catch (e) {
+        console.error('[NEW-CHAT] ❌ Shortcut failed:', e.message);
+        return { error: 'Shortcut failed: ' + e.message };
     }
-    return { error: 'Context failed' };
 }
 // Get Chat History - Two-phase: click in iframe context, scrape from parent context
 async function getChatHistory(cdp) {
@@ -1451,10 +1589,13 @@ async function getAppState(cdp) {
         const textNodes = allEls.filter(el => el.children.length === 0 && el.innerText);
         const modelEl = textNodes.find(el => {
             const txt = el.innerText;
-            // Avoids "Select Model" placeholder if possible, but usually a model is selected
             return KNOWN_MODELS.some(k => txt.includes(k)) &&
-                // Check if it's near a chevron (likely values in the header)
-                el.closest('button')?.querySelector('svg.lucide-chevron-up');
+                // Check if it's inside a button or near a chevron SVG (model selector)
+                (el.closest('button')?.querySelector('svg[class*="chevron"]') ||
+                 el.closest('button')?.querySelector('svg.lucide-chevron-up') ||
+                 el.closest('button')?.querySelector('svg.lucide-chevron-down') ||
+                 el.closest('[role="button"]') ||
+                 el.closest('button'));
         });
 
         if (modelEl) {
@@ -1679,7 +1820,7 @@ async function startBackgroundLoop(wss) {
         try {
             const snapshot = await Promise.race([
                 captureSnapshot(cdpConnection),
-                new Promise(resolve => setTimeout(() => resolve(null), 6000))
+                new Promise(resolve => setTimeout(() => resolve(null), 3000)) // 3s for push-triggered (was 6s)
             ]);
             if (snapshot && snapshot !== '__unchanged__' && !snapshot.error) {
                 const hash = hashString(snapshot.html);
@@ -1713,12 +1854,16 @@ async function startBackgroundLoop(wss) {
             try {
                 await initCDP();
                 if (cdpConnection) {
-                    console.log('✅ CDP Connection established');
+                    console.log(`✅ CDP Connection established (after ${reconnectAttempts} attempts)`);
                     isConnecting = false;
+                    reconnectAttempts = 0;
                     wirePushHandler();
                 }
             } catch (err) { /* wait for next cycle */ }
-            setTimeout(healthCheck, 10000); // 10s reconnect retry (was 3s)
+            // Exponential backoff: 3s -> 6s -> 12s -> 24s -> cap at 30s
+            reconnectAttempts++;
+            const delay = Math.min(RECONNECT_BASE_MS * Math.pow(2, reconnectAttempts - 1), RECONNECT_MAX_MS);
+            setTimeout(healthCheck, delay);
             return;
         }
 
@@ -1779,10 +1924,51 @@ async function startBackgroundLoop(wss) {
             }
         }
 
+        // Queue processing moved to independent startQueueDrainLoop (5s interval)
+
         setTimeout(healthCheck, HEALTH_CHECK_INTERVAL);
     };
 
     healthCheck();
+
+    // --- Independent queue drain loop (5s) ---
+    // Separated from healthCheck so queued messages don't wait 30s
+    function startQueueDrainLoop() {
+        setInterval(async () => {
+            if (messageQueue.length === 0 || isProcessingQueue) return;
+            if (!cdpConnection || cdpConnection.ws?.readyState !== WebSocket.OPEN) return;
+
+            isProcessingQueue = true;
+            try {
+                // Lightweight busy check (<1.5s) instead of full injectMessage (12s)
+                const busy = await isAgentBusy(cdpConnection);
+                if (busy) {
+                    // Still busy — drop stale messages (>5 min old)
+                    const age = Math.round((Date.now() - messageQueue[0].timestamp) / 1000);
+                    if (age > 300) {
+                        const dropped = messageQueue.shift();
+                        console.log(`🗑️ Dropped stale queued message (${age}s old): "${dropped.text.substring(0, 40)}..."`);
+                    }
+                    return;
+                }
+                // Agent is idle — send the queued message
+                const result = await injectMessage(cdpConnection, messageQueue[0].text);
+                if (result.reason === 'busy') {
+                    // Race condition: became busy between check and inject — leave in queue
+                    return;
+                }
+                const sent = messageQueue.shift();
+                console.log(`✅ Queue: sent message "${sent.text.substring(0, 40)}..." (${messageQueue.length} remaining)`);
+                setTimeout(() => fetchAndBroadcastSnapshot(wss), 1000);
+            } catch (e) {
+                console.error('Queue drain error:', e.message);
+            } finally {
+                isProcessingQueue = false; // Always reset — never gets stuck
+            }
+        }, 5000); // Check every 5 seconds
+    }
+
+    startQueueDrainLoop();
 }
 
 // Create Express app
@@ -1947,7 +2133,7 @@ async function createServer() {
 
     // Debug UI Endpoint
     app.get('/debug-ui', async (req, res) => {
-        if (!cdpConnection) return res.status(503).json({ error: 'CDP not connected' });
+        if (!cdpConnection && !(await ensureCDP())) return res.status(503).json({ error: 'CDP not connected' });
         const uiTree = await inspectUI(cdpConnection);
         console.log('--- UI TREE ---');
         console.log(uiTree);
@@ -1958,7 +2144,7 @@ async function createServer() {
     // Set Mode
     app.post('/set-mode', async (req, res) => {
         const { mode } = req.body;
-        if (!cdpConnection) return res.status(503).json({ error: 'CDP disconnected' });
+        if (!cdpConnection && !(await ensureCDP())) return res.status(503).json({ error: 'CDP disconnected' });
         const result = await setMode(cdpConnection, mode);
         res.json(result);
     });
@@ -1966,7 +2152,7 @@ async function createServer() {
     // Set Model
     app.post('/set-model', async (req, res) => {
         const { model } = req.body;
-        if (!cdpConnection) return res.status(503).json({ error: 'CDP disconnected' });
+        if (!cdpConnection && !(await ensureCDP())) return res.status(503).json({ error: 'CDP disconnected' });
         const result = await setModel(cdpConnection, model);
         res.json(result);
     });
@@ -1975,7 +2161,7 @@ async function createServer() {
     app.post('/upload-image', async (req, res) => {
         const { name, dataUrl } = req.body;
         if (!dataUrl) return res.status(400).json({ error: 'No image data' });
-        if (!cdpConnection) return res.status(503).json({ error: 'CDP disconnected' });
+        if (!cdpConnection && !(await ensureCDP())) return res.status(503).json({ error: 'CDP disconnected' });
 
         try {
             // Decode base64 and save to temp file
@@ -2037,7 +2223,7 @@ async function createServer() {
 
     // Stop Generation
     app.post('/stop', async (req, res) => {
-        if (!cdpConnection) return res.status(503).json({ error: 'CDP disconnected' });
+        if (!cdpConnection && !(await ensureCDP())) return res.status(503).json({ error: 'CDP disconnected' });
         const result = await stopGeneration(cdpConnection);
         res.json(result);
     });
@@ -2116,11 +2302,36 @@ async function createServer() {
             return res.status(400).json({ error: 'Message required' });
         }
 
-        if (!cdpConnection) {
+        if (!cdpConnection && !(await ensureCDP())) {
             return res.status(503).json({ error: 'CDP not connected' });
         }
 
-        const result = await injectMessage(cdpConnection, message);
+        // Timeout the inject so the /send endpoint never hangs
+        const result = await Promise.race([
+            injectMessage(cdpConnection, message),
+            new Promise(resolve => setTimeout(() => resolve({ ok: false, reason: 'endpoint_timeout' }), 10000))
+        ]);
+
+        // If agent is busy (terminal running), queue the message instead of dropping it
+        if (result.reason === 'busy') {
+            if (messageQueue.length >= MAX_QUEUED_MESSAGES) {
+                return res.json({
+                    success: false,
+                    queued: false,
+                    reason: 'queue_full',
+                    queueSize: messageQueue.length,
+                    details: { error: 'Message queue full (max ' + MAX_QUEUED_MESSAGES + '). Agent is busy.' }
+                });
+            }
+            messageQueue.push({ text: message, timestamp: Date.now() });
+            console.log(`📋 Message queued (${messageQueue.length}/${MAX_QUEUED_MESSAGES}): "${message.substring(0, 50)}..."`);
+            return res.json({
+                success: true,
+                queued: true,
+                queuePosition: messageQueue.length,
+                details: { reason: 'Agent busy — message queued for auto-send when idle' }
+            });
+        }
 
         // Always return 200 - the message usually goes through even if CDP reports issues
         // The client will refresh and see if the message appeared
@@ -2133,7 +2344,7 @@ async function createServer() {
 
     // UI Inspection endpoint - Returns all buttons as JSON for debugging
     app.get('/ui-inspect', async (req, res) => {
-        if (!cdpConnection) return res.status(503).json({ error: 'CDP disconnected' });
+        if (!cdpConnection && !(await ensureCDP())) return res.status(503).json({ error: 'CDP disconnected' });
 
         const EXP = `(() => {
     try {
@@ -2367,7 +2578,7 @@ async function main() {
         // Remote Click
         app.post('/remote-click', async (req, res) => {
             const { selector, index, textContent } = req.body;
-            if (!cdpConnection) return res.status(503).json({ error: 'CDP disconnected' });
+            if (!cdpConnection && !(await ensureCDP())) return res.status(503).json({ error: 'CDP disconnected' });
             const result = await clickElement(cdpConnection, { selector, index, textContent });
             res.json(result);
         });
@@ -2375,7 +2586,7 @@ async function main() {
         // Approve Action - Find and click approval buttons in IDE
         app.post('/approve-action', async (req, res) => {
             const { buttonText } = req.body;
-            if (!cdpConnection) return res.status(503).json({ error: 'CDP disconnected' });
+            if (!cdpConnection && !(await ensureCDP())) return res.status(503).json({ error: 'CDP disconnected' });
 
             console.log(`[APPROVE] Looking for button: "${buttonText}"`);
 
@@ -2455,7 +2666,7 @@ async function main() {
         // Remote Scroll - sync phone scroll to desktop
         app.post('/remote-scroll', async (req, res) => {
             const { scrollTop, scrollPercent } = req.body;
-            if (!cdpConnection) return res.status(503).json({ error: 'CDP disconnected' });
+            if (!cdpConnection && !(await ensureCDP())) return res.status(503).json({ error: 'CDP disconnected' });
             const result = await remoteScroll(cdpConnection, { scrollTop, scrollPercent });
             res.json(result);
         });
@@ -2469,11 +2680,12 @@ async function main() {
 
         // Start New Chat
         app.post('/new-chat', async (req, res) => {
-            if (!cdpConnection) return res.status(503).json({ error: 'CDP disconnected' });
+            if (!cdpConnection && !(await ensureCDP())) return res.status(503).json({ error: 'CDP disconnected' });
             const result = await startNewChat(cdpConnection);
 
             // After creating new chat, activate agent mode with Ctrl+E
             if (result.success) {
+                cachedCascadeCtxId = null; // Invalidate — new chat may change contexts
                 await new Promise(r => setTimeout(r, 1000)); // Wait for chat to initialize
                 try {
                     await cdpConnection.call("Input.dispatchKeyEvent", {
@@ -2506,7 +2718,7 @@ async function main() {
         app.post('/select-chat', async (req, res) => {
             const { title } = req.body;
             if (!title) return res.status(400).json({ error: 'Chat title required' });
-            if (!cdpConnection) return res.status(503).json({ error: 'CDP disconnected' });
+            if (!cdpConnection && !(await ensureCDP())) return res.status(503).json({ error: 'CDP disconnected' });
             const result = await selectChat(cdpConnection, title);
             res.json(result);
         });

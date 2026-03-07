@@ -32,6 +32,21 @@ let lastHash = '';
 let currentMode = 'Fast';
 let chatIsOpen = true; // Track if a chat is currently open
 
+// --- Toast Notification ---
+function showToast(message, duration = 3000) {
+    let toast = document.getElementById('ag-toast');
+    if (!toast) {
+        toast = document.createElement('div');
+        toast.id = 'ag-toast';
+        toast.style.cssText = 'position:fixed;top:60px;left:50%;transform:translateX(-50%);background:rgba(30,41,59,0.95);color:#e2e8f0;padding:10px 20px;border-radius:8px;font-size:13px;z-index:9999;opacity:0;transition:opacity 0.3s;pointer-events:none;max-width:80%;text-align:center;border:1px solid rgba(59,130,246,0.3);';
+        document.body.appendChild(toast);
+    }
+    toast.textContent = message;
+    toast.style.opacity = '1';
+    clearTimeout(toast._timer);
+    toast._timer = setTimeout(() => { toast.style.opacity = '0'; }, duration);
+}
+
 
 // --- Auth Utilities ---
 async function fetchWithAuth(url, options = {}) {
@@ -120,9 +135,9 @@ function dismissSslBanner() {
 checkSslStatus();
 // --- Models ---
 const MODELS = [
-    "Gemini 3 Pro (High)",
-    "Gemini 3 Pro (Low)",
-    "Gemini 3 Flash",
+    "Gemini 3.1 Pro (High)",
+    "Gemini 3.1 Pro (Low)",
+    "Gemini 3.1 Flash",
     "Claude Sonnet 4.5",
     "Claude Sonnet 4.5 (Thinking)",
     "Claude Opus 4.6",
@@ -182,7 +197,10 @@ async function loadSnapshot() {
             icon.classList.add('spin-anim');
         }
 
-        const response = await fetchWithAuth('/snapshot');
+        const snapshotController = new AbortController();
+        const snapshotTimeout = setTimeout(() => snapshotController.abort(), 8000); // 8s timeout
+        const response = await fetchWithAuth('/snapshot', { signal: snapshotController.signal });
+        clearTimeout(snapshotTimeout);
         if (!response.ok) {
             if (response.status === 503) {
                 // No snapshot available - likely no chat open
@@ -633,14 +651,55 @@ async function sendMessage() {
 
         // Send text message if present
         if (message) {
-            const res = await fetchWithAuth('/send', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ message })
-            });
+            const sendController = new AbortController();
+            const sendTimeout = setTimeout(() => sendController.abort(), 15000); // 15s timeout
+            try {
+                const res = await fetchWithAuth('/send', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ message }),
+                    signal: sendController.signal
+                });
+                clearTimeout(sendTimeout);
 
-            if (!res.ok) {
-                console.warn('Send response not ok, but message may have been sent:', await res.json().catch(() => ({})));
+                if (res.ok) {
+                    const data = await res.json();
+                    // Handle queued messages (agent is busy with terminal command)
+                    if (data.queued) {
+                        showToast(`📋 Message queued (#${data.queuePosition}) — agent is busy`, 4000);
+                    } else if (data.reason === 'queue_full') {
+                        showToast('⚠️ Queue full — agent is very busy, try again later', 4000);
+                        messageInput.value = message;
+                    } else if (data.reason === 'endpoint_timeout') {
+                        showToast('⏳ Server busy — message may still go through', 3000);
+                    }
+                } else if (res.status === 503) {
+                    showToast('⚠️ CDP disconnected — retrying...', 2000);
+                    // Retry once after 2s
+                    setTimeout(async () => {
+                        try {
+                            await fetchWithAuth('/send', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ message })
+                            });
+                            showToast('✅ Message sent on retry', 2000);
+                            setTimeout(loadSnapshot, 500);
+                        } catch (e) {
+                            showToast('❌ Retry failed — check connection', 3000);
+                            messageInput.value = message;
+                        }
+                    }, 2000);
+                } else {
+                    console.warn('Send response not ok:', await res.json().catch(() => ({})));
+                }
+            } catch (fetchErr) {
+                clearTimeout(sendTimeout);
+                if (fetchErr.name === 'AbortError') {
+                    showToast('⏳ Send timed out — server may be busy', 3000);
+                } else {
+                    throw fetchErr; // Re-throw for outer catch
+                }
             }
         }
 
@@ -651,6 +710,21 @@ async function sendMessage() {
     } catch (e) {
         // Network error - still try to refresh in case it went through
         console.error('Send error:', e);
+        showToast('⚠️ Network error — retrying...', 2000);
+        // Retry once on network error
+        setTimeout(async () => {
+            try {
+                await fetchWithAuth('/send', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ message })
+                });
+                showToast('✅ Message sent on retry', 2000);
+            } catch (e2) {
+                messageInput.value = message;
+                showToast('❌ Send failed — message restored', 3000);
+            }
+        }, 2000);
         setTimeout(loadSnapshot, 500);
     } finally {
         sendBtn.disabled = false;
