@@ -135,13 +135,12 @@ function dismissSslBanner() {
 checkSslStatus();
 // --- Models ---
 const MODELS = [
-    "Gemini 3.1 Pro (High)",
-    "Gemini 3.1 Pro (Low)",
-    "Gemini 3.1 Flash",
+    "Gemini 3 Pro (High)",
+    "Gemini 3 Pro (Low)",
+    "Gemini 3 Flash ⚡",
     "Claude Sonnet 4.5",
     "Claude Sonnet 4.5 (Thinking)",
-    "Claude Opus 4.6",
-    "Claude Opus 4.6 (Thinking)",
+    "Claude Opus 4.5 (Thinking) 💎",
     "GPT-OSS 120B (Medium)"
 ];
 
