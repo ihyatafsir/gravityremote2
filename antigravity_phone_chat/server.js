@@ -1128,10 +1128,11 @@ async function setModel(cdp, modelName) {
 
             // Find the dialog/dropdown - search globally (React portals render at body level)
             let visibleDialog = null;
+            const rootSearchWord = '${modelName}'.split(' ')[0]; // E.g., "Gemini", "Claude", "GPT"
             
             // Try specific dialog patterns first
             const dialogs = Array.from(document.querySelectorAll('[role="dialog"], [role="listbox"], [role="menu"], [data-radix-popper-content-wrapper]'));
-            visibleDialog = dialogs.find(d => d.offsetHeight > 0 && d.innerText?.includes('${modelName}'));
+            visibleDialog = dialogs.find(d => d.offsetHeight > 0 && d.innerText?.includes(rootSearchWord));
             
             // Fallback: look for positioned divs
             if (!visibleDialog) {
@@ -1140,7 +1141,7 @@ async function setModel(cdp, modelName) {
                         const style = window.getComputedStyle(d);
                         return d.offsetHeight > 0 && 
                                (style.position === 'absolute' || style.position === 'fixed') && 
-                               d.innerText?.includes('${modelName}') && 
+                               d.innerText?.includes(rootSearchWord) && 
                                !d.innerText?.includes('Files With Changes');
                     });
             }
@@ -1150,7 +1151,7 @@ async function setModel(cdp, modelName) {
                 const allElements = Array.from(document.querySelectorAll('[role="menuitem"], [role="option"]'));
                 const target = allElements.find(el => 
                     el.offsetParent !== null && 
-                    (el.innerText?.trim() === '${modelName}' || el.innerText?.includes('${modelName}'))
+                    (el.innerText?.trim() === '${modelName}' || el.innerText?.includes(rootSearchWord))
                 );
                 if (target) {
                     target.click();
@@ -1166,17 +1167,29 @@ async function setModel(cdp, modelName) {
             // A. Exact Match (Best)
             let target = validEls.find(el => el.textContent.trim() === '${modelName}');
             
-            // B. Page contains Model
+            // B. Page contains Model exact string
             if (!target) {
                 target = validEls.find(el => el.textContent.includes('${modelName}'));
             }
 
-            // C. Closest partial match
+            // C. Token-based Substring matching (Fuzzy)
             if (!target) {
-                const partialMatches = validEls.filter(el => '${modelName}'.includes(el.textContent.trim()));
-                if (partialMatches.length > 0) {
-                    partialMatches.sort((a, b) => b.textContent.trim().length - a.textContent.trim().length);
-                    target = partialMatches[0];
+                // Break requested model into significant words (ignore numbers, punctuation, short words)
+                // e.g. "Claude Sonnet 4.5" -> ["Claude", "Sonnet"]
+                const searchTokens = '${modelName}'.split(/[\\s\\()]+/).filter(t => /^[a-zA-Z]{3,}$/.test(t));
+                
+                const scoredMatches = validEls.map(el => {
+                    const txt = el.textContent;
+                    let score = 0;
+                    for (const token of searchTokens) {
+                        if (txt.includes(token)) score++;
+                    }
+                    return { el, score };
+                }).filter(m => m.score > 0);
+
+                if (scoredMatches.length > 0) {
+                    scoredMatches.sort((a, b) => b.score - a.score); // Highest score first
+                    target = scoredMatches[0].el;
                 }
             }
 
