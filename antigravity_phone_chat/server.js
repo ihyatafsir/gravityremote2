@@ -499,22 +499,24 @@ async function captureSnapshot(cdp) {
             scrollPercent: scrollContainer.scrollTop / (scrollContainer.scrollHeight - scrollContainer.clientHeight) || 0
         };
         
-        const clone = cascade.cloneNode(true);
-        
         // --- Trim old messages to save phone RAM ---
-        // Keep only the last ~50 direct children (message blocks)
+        // Keep only the last ~50 message blocks (inside the actual scroll container)
+        const clone = cascade.cloneNode(true);
+        const scrollContainerClone = clone.querySelector('.overflow-y-auto, [data-scroll-area]') || clone;
+        const msgContainer = scrollContainerClone.firstElementChild ? scrollContainerClone : scrollContainerClone;
+        
         const MAX_CHILDREN = 50;
-        const children = Array.from(clone.children);
+        const children = Array.from(msgContainer.children);
         if (children.length > MAX_CHILDREN) {
             const toRemove = children.length - MAX_CHILDREN;
             for (let i = 0; i < toRemove; i++) {
-                clone.removeChild(children[i]);
+                msgContainer.removeChild(children[i]);
             }
             // Add a small indicator that older messages were trimmed
             const trimNote = document.createElement('div');
             trimNote.style.cssText = 'text-align:center;padding:8px;color:#666;font-size:12px;border-bottom:1px solid #333;margin-bottom:8px;';
             trimNote.textContent = '⬆ ' + toRemove + ' earlier messages not shown (scroll on desktop to see)';
-            clone.insertBefore(trimNote, clone.firstChild);
+            msgContainer.insertBefore(trimNote, msgContainer.firstChild);
         }
         
         try {
@@ -1568,54 +1570,32 @@ async function getAppState(cdp) {
         const state = { mode: 'Unknown', model: 'Unknown' };
 
         // 1. Get Mode (Fast/Planning)
-        // Strategy: Find the clickable mode button which contains either "Fast" or "Planning"
-        // It's usually a button or div with cursor:pointer containing the mode text
-        const allEls = Array.from(document.querySelectorAll('*'));
+        const modeTexts = Array.from(document.querySelectorAll('button:not(:disabled), div[role="button"]:not(:disabled)'))
+            .map(el => el.textContent?.trim())
+            .filter(t => t === 'Fast' || t === 'Planning');
+        
+        if (modeTexts.length > 0) {
+            state.mode = modeTexts[0];
+        }
 
-        // Find elements that are likely mode buttons
-        for (const el of allEls) {
-            if (el.children.length > 0) continue;
-            const text = (el.innerText || '').trim();
-            if (text !== 'Fast' && text !== 'Planning') continue;
-
-            // Check if this or a parent is clickable (the actual mode selector)
-            let current = el;
-            for (let i = 0; i < 5; i++) {
-                if (!current) break;
-                const style = window.getComputedStyle(current);
-                if (style.cursor === 'pointer' || current.tagName === 'BUTTON') {
-                    state.mode = text;
+        // 2. Get Model (Gemini, Claude, GPT)
+        // Strategy: Only scan buttons that could be model selectors (usually header)
+        // rather than the whole document.
+        const KNOWN_MODELS = ["Gemini", "Claude", "GPT"];
+        const headerButtons = Array.from(document.querySelectorAll('button, [role="button"]'));
+        
+        for (const btn of headerButtons) {
+            const txt = btn.textContent || '';
+            if (KNOWN_MODELS.some(k => txt.includes(k))) {
+                // Must have a chevron or be a likely model button
+                if (btn.querySelector('svg[class*="chevron"]') ||
+                    btn.querySelector('svg.lucide-chevron-up') ||
+                    btn.querySelector('svg.lucide-chevron-down') ||
+                    btn.closest('header')) {
+                    state.model = txt.trim();
                     break;
                 }
-                current = current.parentElement;
             }
-            if (state.mode !== 'Unknown') break;
-        }
-
-        // Fallback: Just look for visible text
-        if (state.mode === 'Unknown') {
-            const textNodes = allEls.filter(el => el.children.length === 0 && el.innerText);
-            if (textNodes.some(el => el.innerText.trim() === 'Planning')) state.mode = 'Planning';
-            else if (textNodes.some(el => el.innerText.trim() === 'Fast')) state.mode = 'Fast';
-        }
-
-        // 2. Get Model
-        // Strategy: Look for button containing a known model keyword
-        const KNOWN_MODELS = ["Gemini", "Claude", "GPT"];
-        const textNodes = allEls.filter(el => el.children.length === 0 && el.innerText);
-        const modelEl = textNodes.find(el => {
-            const txt = el.innerText;
-            return KNOWN_MODELS.some(k => txt.includes(k)) &&
-                // Check if it's inside a button or near a chevron SVG (model selector)
-                (el.closest('button')?.querySelector('svg[class*="chevron"]') ||
-                 el.closest('button')?.querySelector('svg.lucide-chevron-up') ||
-                 el.closest('button')?.querySelector('svg.lucide-chevron-down') ||
-                 el.closest('[role="button"]') ||
-                 el.closest('button'));
-        });
-
-        if (modelEl) {
-            state.model = modelEl.innerText.trim();
         }
 
         return state;
@@ -1836,7 +1816,7 @@ async function startBackgroundLoop(wss) {
         try {
             const snapshot = await Promise.race([
                 captureSnapshot(cdpConnection),
-                new Promise(resolve => setTimeout(() => resolve(null), 3000)) // 3s for push-triggered (was 6s)
+                new Promise(resolve => setTimeout(() => resolve(null), 8000)) // 8s timeout (was 3s, but large DOM eval takes longer under heavy terminal load)
             ]);
             if (snapshot && snapshot !== '__unchanged__' && !snapshot.error) {
                 const hash = hashString(snapshot.html);

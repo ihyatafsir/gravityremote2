@@ -366,15 +366,13 @@ app.post('/api/tabs/focus', async (req, res) => {
 // Model configuration for delegation
 // Model configuration for delegation
 const AVAILABLE_MODELS = [
-    { index: 0, name: 'Gemini 3 Pro (High)', key: 'gemini-pro-high' },
-    { index: 1, name: 'Gemini 3 Pro (Low)', key: 'gemini-pro-low' },
-    { index: 2, name: 'Gemini 3 Flash', key: 'gemini-flash' },
-    { index: 3, name: 'Claude Sonnet 4.5', key: 'claude-sonnet' },
-    { index: 4, name: 'Claude Sonnet 4.5 (Thinking)', key: 'claude-sonnet-thinking' },
-    { index: 5, name: 'Claude Opus 4.5 (Thinking)', key: 'claude-opus-thinking-legacy' }, // Kept for historical reference if needed, but indices shift
-    { index: 6, name: 'Claude Opus 4.6', key: 'claude-opus' },
-    { index: 7, name: 'Claude Opus 4.6 (Thinking)', key: 'claude-opus-thinking' },
-    { index: 8, name: 'GPT-OSS 120B (Medium)', key: 'gpt-oss-120b' }
+    { index: 0, name: 'Gemini 3.1 Pro (High)', key: 'gemini-pro-high' },
+    { index: 1, name: 'Gemini 3.1 Pro (Low)', key: 'gemini-pro-low' },
+    { index: 2, name: 'Gemini 3.1 Flash', key: 'gemini-flash' },
+    { index: 3, name: 'Claude Sonnet 3.7', key: 'claude-sonnet' },
+    { index: 4, name: 'Claude Sonnet 3.7 (Thinking)', key: 'claude-sonnet-thinking' },
+    { index: 5, name: 'Claude Opus 3.7 (Thinking)', key: 'claude-opus-thinking' },
+    { index: 6, name: 'GPT-OSS 120B (Medium)', key: 'gpt-oss-120b' }
 ];
 
 // POST /api/delegation - Create a new delegation task with optional model selection
