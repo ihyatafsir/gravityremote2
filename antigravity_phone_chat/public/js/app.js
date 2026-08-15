@@ -11,6 +11,12 @@ const stopBtn = document.getElementById('stopBtn');
 const newChatBtn = document.getElementById('newChatBtn');
 const historyBtn = document.getElementById('historyBtn');
 
+const activeChatTitle = document.getElementById('activeChatTitle');
+const historyCountBadge = document.getElementById('historyCountBadge');
+const drawerCountTag = document.getElementById('drawerCountTag');
+const historySearchInput = document.getElementById('historySearchInput');
+const clearSearchBtn = document.getElementById('clearSearchBtn');
+
 const modeBtn = document.getElementById('modeBtn');
 const modelBtn = document.getElementById('modelBtn');
 const modalOverlay = document.getElementById('modalOverlay');
@@ -21,16 +27,24 @@ const modelText = document.getElementById('modelText');
 const historyLayer = document.getElementById('historyLayer');
 const historyList = document.getElementById('historyList');
 
+const restartModalOverlay = document.getElementById('restartModalOverlay');
+const restartProgressOverlay = document.getElementById('restartProgressOverlay');
+const restartProgressTitle = document.getElementById('restartProgressTitle');
+const restartProgressDesc = document.getElementById('restartProgressDesc');
+const restartCountdownVal = document.getElementById('restartCountdownVal');
+
 // --- State ---
 let autoRefreshEnabled = true;
 let userIsScrolling = false;
-let userScrollLockUntil = 0; // Timestamp until which we respect user scroll
+let userScrollLockUntil = 0;
 let lastScrollPosition = 0;
 let ws = null;
 let idleTimer = null;
 let lastHash = '';
 let currentMode = 'Fast';
-let chatIsOpen = true; // Track if a chat is currently open
+let chatIsOpen = true;
+let currentChatTitle = 'Current Conversation';
+let cachedConversations = [];
 
 // --- Toast Notification ---
 function showToast(message, duration = 3000) {
@@ -38,33 +52,30 @@ function showToast(message, duration = 3000) {
     if (!toast) {
         toast = document.createElement('div');
         toast.id = 'ag-toast';
-        toast.style.cssText = 'position:fixed;top:60px;left:50%;transform:translateX(-50%);background:rgba(30,41,59,0.95);color:#e2e8f0;padding:10px 20px;border-radius:8px;font-size:13px;z-index:9999;opacity:0;transition:opacity 0.3s;pointer-events:none;max-width:80%;text-align:center;border:1px solid rgba(59,130,246,0.3);';
         document.body.appendChild(toast);
     }
     toast.textContent = message;
     toast.style.opacity = '1';
+    toast.style.transform = 'translateX(-50%) translateY(0)';
     clearTimeout(toast._timer);
-    toast._timer = setTimeout(() => { toast.style.opacity = '0'; }, duration);
+    toast._timer = setTimeout(() => {
+        toast.style.opacity = '0';
+        toast.style.transform = 'translateX(-50%) translateY(-10px)';
+    }, duration);
 }
-
 
 // --- Auth Utilities ---
 async function fetchWithAuth(url, options = {}) {
-    // Add ngrok skip warning header to all requests
     if (!options.headers) options.headers = {};
     options.headers['ngrok-skip-browser-warning'] = 'true';
-
     try {
         const res = await fetch(url, options);
-        if (res.status === 401) {
-            console.log('[AUTH] 401 response (auth disabled, ignoring)');
-        }
         return res;
     } catch (e) {
         throw e;
     }
 }
-const USER_SCROLL_LOCK_DURATION = 3000; // 3 seconds of scroll protection
+const USER_SCROLL_LOCK_DURATION = 3000;
 
 // --- Sync State (Desktop is Always Priority) ---
 async function fetchAppState() {
@@ -72,76 +83,73 @@ async function fetchAppState() {
         const res = await fetchWithAuth('/app-state');
         const data = await res.json();
 
-        // Mode Sync (Fast/Planning) - Desktop is source of truth
         if (data.mode && data.mode !== 'Unknown') {
             modeText.textContent = data.mode;
             modeBtn.classList.toggle('active', data.mode === 'Planning');
             currentMode = data.mode;
         }
 
-        // Model Sync - Desktop is source of truth
         if (data.model && data.model !== 'Unknown') {
             modelText.textContent = data.model;
         }
-
-        console.log('[SYNC] State refreshed from Desktop:', data);
-    } catch (e) { console.error('[SYNC] Failed to sync state', e); }
+    } catch (e) { }
 }
 
 // --- SSL Banner ---
 const sslBanner = document.getElementById('sslBanner');
 
 async function checkSslStatus() {
-    // Only show banner if currently on HTTP
     if (window.location.protocol === 'https:') return;
-
-    // Check if user dismissed the banner before
     if (localStorage.getItem('sslBannerDismissed')) return;
-
-    sslBanner.style.display = 'flex';
+    if (sslBanner) sslBanner.style.display = 'flex';
 }
 
 async function enableHttps() {
     const btn = document.getElementById('enableHttpsBtn');
-    btn.textContent = 'Generating...';
-    btn.disabled = true;
+    if (btn) {
+        btn.textContent = 'Generating...';
+        btn.disabled = true;
+    }
 
     try {
         const res = await fetchWithAuth('/generate-ssl', { method: 'POST' });
         const data = await res.json();
 
-        if (data.success) {
+        if (data.success && sslBanner) {
             sslBanner.innerHTML = `
                 <span>✅ ${data.message}</span>
                 <button onclick="location.reload()">Reload After Restart</button>
             `;
             sslBanner.style.background = 'linear-gradient(90deg, #22c55e, #16a34a)';
-        } else {
+        } else if (btn) {
             btn.textContent = 'Failed - Retry';
             btn.disabled = false;
         }
     } catch (e) {
-        btn.textContent = 'Error - Retry';
-        btn.disabled = false;
+        if (btn) {
+            btn.textContent = 'Error - Retry';
+            btn.disabled = false;
+        }
     }
 }
 
 function dismissSslBanner() {
-    sslBanner.style.display = 'none';
+    if (sslBanner) sslBanner.style.display = 'none';
     localStorage.setItem('sslBannerDismissed', 'true');
 }
 
-// Check SSL on load
 checkSslStatus();
+
 // --- Models ---
 const MODELS = [
-    "Gemini 3.1 Pro (High)",
-    "Gemini 3.1 Pro (Low)",
-    "Gemini 3.1 Flash ⚡",
-    "Claude Sonnet 4.6",
+    "Gemini 3.7 Flash (High)",
+    "Gemini 3.7 Flash (Medium)",
+    "Gemini 3.7 Flash (Low)",
+    "Gemini 3.6 Flash (High)",
     "Claude Sonnet 4.6 (Thinking)",
     "Claude Opus 4.6 (Thinking) 💎",
-    "GPT-OSS 120B (Medium)"
+    "GPT-OSS 120B (Medium)",
+    "DeepSeek R1 (Reasoning) ⚡"
 ];
 
 // --- WebSocket ---
@@ -156,14 +164,12 @@ function connectWebSocket() {
     };
 
     ws.onmessage = (event) => {
-        const data = JSON.parse(event.data);
-        if (data.type === 'error' && data.message === 'Unauthorized') {
-            console.log('[AUTH] WS auth error (auth disabled, ignoring)');
-            return;
-        }
-        if (data.type === 'snapshot_update' && autoRefreshEnabled && !userIsScrolling) {
-            loadSnapshot();
-        }
+        try {
+            const data = JSON.parse(event.data);
+            if (data.type === 'snapshot_update' && autoRefreshEnabled && !userIsScrolling) {
+                loadSnapshot();
+            }
+        } catch (e) { }
     };
 
     ws.onclose = () => {
@@ -188,21 +194,12 @@ function updateStatus(connected) {
 // --- Rendering ---
 async function loadSnapshot() {
     try {
-        // Add spin animation to refresh button (if SVG exists)
-        const icon = refreshBtn.querySelector('svg');
-        if (icon) {
-            icon.classList.remove('spin-anim');
-            void icon.offsetWidth; // trigger reflow
-            icon.classList.add('spin-anim');
-        }
-
         const snapshotController = new AbortController();
-        const snapshotTimeout = setTimeout(() => snapshotController.abort(), 8000); // 8s timeout
+        const snapshotTimeout = setTimeout(() => snapshotController.abort(), 8000);
         const response = await fetchWithAuth('/snapshot', { signal: snapshotController.signal });
         clearTimeout(snapshotTimeout);
         if (!response.ok) {
             if (response.status === 503) {
-                // No snapshot available - likely no chat open
                 chatIsOpen = false;
                 showEmptyState();
                 return;
@@ -210,9 +207,7 @@ async function loadSnapshot() {
             throw new Error('Failed to load');
         }
 
-        // Mark chat as open since we got a valid snapshot
         chatIsOpen = true;
-
         const data = await response.json();
 
         // Capture scroll state BEFORE updating content
@@ -222,7 +217,6 @@ async function loadSnapshot() {
         const isNearBottom = scrollHeight - scrollPos - clientHeight < 120;
         const isUserScrollLocked = Date.now() < userScrollLockUntil;
 
-        // --- UPDATE STATS ---
         if (data.stats) {
             const kbs = Math.round((data.stats.htmlSize + data.stats.cssSize) / 1024);
             const nodes = data.stats.nodes;
@@ -230,7 +224,7 @@ async function loadSnapshot() {
             if (statsText) statsText.textContent = `${nodes} Nodes · ${kbs}KB`;
         }
 
-        // --- CSS INJECTION (Cached) ---
+        // CSS Injection
         let styleTag = document.getElementById('cdp-styles');
         if (!styleTag) {
             styleTag = document.createElement('style');
@@ -238,804 +232,569 @@ async function loadSnapshot() {
             document.head.appendChild(styleTag);
         }
 
-        const darkModeOverrides = '/* --- BASE SNAPSHOT CSS --- */\n' +
-            data.css +
-            '\n\n/* --- FORCE DARK MODE OVERRIDES --- */\n' +
-            ':root {\n' +
-            '    --bg-app: #181818;\n' +
-            '    --text-main: #CCCCCC;\n' +
-            '    --text-muted: #858585;\n' +
-            '    --border-color: #2B2B2B;\n' +
-            '}\n' +
-            '\n' +
-            '#conversation, #chat, #cascade {\n' +
-            '    background-color: transparent !important;\n' +
-            '    color: var(--text-main) !important;\n' +
-            '    font-family: \'Inter\', system-ui, sans-serif !important;\n' +
-            '    font-size: 15px !important;\n' +
-            '    position: relative !important;\n' +
-            '    height: auto !important;\n' +
-            '    width: 100% !important;\n' +
-            '}\n' +
-            '\n' +
-            '#conversation *, #chat *, #cascade * {\n' +
-            '    position: static !important;\n' +
-            '}\n' +
-            '\n' +
-            '#conversation p, #chat p, #cascade p, #conversation h1, #chat h1, #cascade h1, #conversation h2, #chat h2, #cascade h2, #conversation h3, #chat h3, #cascade h3, #conversation h4, #chat h4, #cascade h4, #conversation h5, #chat h5, #cascade h5, #conversation span, #chat span, #cascade span, #conversation div, #chat div, #cascade div, #conversation li, #chat li, #cascade li {\n' +
-            '    color: inherit !important;\n' +
-            '}\n' +
-            '\n' +
-            '#conversation a, #chat a, #cascade a {\n' +
-            '    color: #60a5fa !important;\n' +
-            '    text-decoration: underline;\n' +
-            '}\n' +
-            '\n' +
-            '/* Fix Inline Code - Ultra-compact */\n' +
-            ':not(pre) > code {\n' +
-            '    padding: 0px 2px !important;\n' +
-            '    border-radius: 2px !important;\n' +
-            '    background-color: rgba(255, 255, 255, 0.1) !important;\n' +
-            '    font-size: 0.82em !important;\n' +
-            '    line-height: 1 !important;\n' +
-            '    white-space: normal !important;\n' +
-            '}\n' +
-            '\n' +
-            'pre, code, .monaco-editor-background {' +
-            '    background-color: #1e293b !important;' +
-            '    color: #e2e8f0 !important;' +
-            '    font-family: \'JetBrains Mono\', monospace !important;' +
-            '    border-radius: 3px;' +
-            '    border: 1px solid #334155;' +
-            '}\n' +
-            '\n' +
-            '/* Terminal blocks - collapse empty ones, limit height */' +
-            '[class*="terminal"] {' +
-            '    background-color: #1e293b !important;' +
-            '    color: #e2e8f0 !important;' +
-            '    font-family: \'JetBrains Mono\', monospace !important;' +
-            '    border-radius: 3px;' +
-            '    border: 1px solid #334155;' +
-            '    max-height: 300px !important;' +
-            '    overflow: hidden !important;' +
-            '    height: auto !important;' +
-            '    min-height: 0 !important;' +
-            '}\n' +
-            '\n' +
-            '/* Hide truly empty terminal containers */' +
-            '[class*="terminal"]:empty,' +
-            '[class*="terminal"]:not(:has(*)),' +
-            '[class*="xterm"]:empty,' +
-            '[class*="xterm"]:not(:has(*)) {' +
-            '    display: none !important;' +
-            '}\n' +
-            '                \n' +
-            '/* Multi-line Code Block - Minimal */\n' +
-            'pre {\n' +
-            '    position: relative !important;\n' +
-            '    white-space: pre-wrap !important; \n' +
-            '    word-break: break-word !important;\n' +
-            '    padding: 4px 6px !important;\n' +
-            '    margin: 2px 0 !important;\n' +
-            '    display: block !important;\n' +
-            '    width: 100% !important;\n' +
-            '}\n' +
-            '                \n' +
-            'pre.has-copy-btn {\n' +
-            '    padding-right: 28px !important;\n' +
-            '}\n' +
-            '                \n' +
-            '/* Single-line Code Block - Minimal */\n' +
-            'pre.single-line-pre {\n' +
-            '    display: inline-block !important;\n' +
-            '    width: auto !important;\n' +
-            '    max-width: 100% !important;\n' +
-            '    padding: 0px 4px !important;\n' +
-            '    margin: 0px !important;\n' +
-            '    vertical-align: middle !important;\n' +
-            '    background-color: #1e293b !important;\n' +
-            '    font-size: 0.85em !important;\n' +
-            '}\n' +
-            '                \n' +
-            'pre.single-line-pre > code {\n' +
-            '    display: inline !important;\n' +
-            '    white-space: nowrap !important;\n' +
-            '}\n' +
-            '                \n' +
-            'pre:not(.single-line-pre) > code {\n' +
-            '    display: block !important;\n' +
-            '    width: 100% !important;\n' +
-            '    overflow-x: auto !important;\n' +
-            '    background: transparent !important;\n' +
-            '    border: none !important;\n' +
-            '    padding: 0 !important;\n' +
-            '    margin: 0 !important;\n' +
-            '}\n' +
-            '                \n' +
-            '.mobile-copy-btn {\n' +
-            '    position: absolute !important;\n' +
-            '    top: 2px !important;\n' +
-            '    right: 2px !important;\n' +
-            '    background: rgba(30, 41, 59, 0.5) !important; /* Transparent bg */\n' +
-            '    color: #94a3b8 !important;\n' +
-            '    border: none !important;\n' +
-            '    width: 24px !important; \n' +
-            '    height: 24px !important;\n' +
-            '    padding: 0 !important;\n' +
-            '    cursor: pointer !important;\n' +
-            '    display: flex !important;\n' +
-            '    align-items: center !important;\n' +
-            '    justify-content: center !important;\n' +
-            '    border-radius: 4px !important;\n' +
-            '    transition: all 0.2s ease !important;\n' +
-            '    -webkit-tap-highlight-color: transparent !important;\n' +
-            '    z-index: 10 !important;\n' +
-            '    margin: 0 !important;\n' +
-            '}\n' +
-            '                \n' +
-            '.mobile-copy-btn:hover,\n' +
-            '.mobile-copy-btn:focus {\n' +
-            '    background: rgba(59, 130, 246, 0.2) !important;\n' +
-            '    color: #60a5fa !important;\n' +
-            '}\n' +
-            '                \n' +
-            '.mobile-copy-btn svg {\n' +
-            '    width: 16px !important;\n' +
-            '    height: 16px !important;\n' +
-            '    stroke: currentColor !important;\n' +
-            '    stroke-width: 2 !important;\n' +
-            '    fill: none !important;\n' +
-            '}\n' +
-            '                \n' +
-            'blockquote {\n' +
-            '    border-left: 3px solid #3b82f6 !important;\n' +
-            '    background: rgba(59, 130, 246, 0.1) !important;\n' +
-            '    color: #cbd5e1 !important;\n' +
-            '    padding: 8px 12px !important;\n' +
-            '    margin: 8px 0 !important;\n' +
-            '}\n' +
-            '\n' +
-            'table {\n' +
-            '    border-collapse: collapse !important;\n' +
-            '    width: 100% !important;\n' +
-            '    border: 1px solid #334155 !important;\n' +
-            '}\n' +
-            'th, td {\n' +
-            '    border: 1px solid #334155 !important;\n' +
-            '    padding: 8px !important;\n' +
-            '    color: #e2e8f0 !important;\n' +
-            '}\n' +
-            '\n' +
-            '::-webkit-scrollbar {\n' +
-            '    width: 0 !important;\n' +
-            '}\n' +
-            '                \n' +
-            '[style*="background-color: rgb(255, 255, 255)"],\n' +
-            '[style*="background-color: white"],\n' +
-            '[style*="background: white"] {\n' +
-            '    background-color: transparent !important;\n' +
-            '}\n' +
-            '';
+        const darkModeOverrides = `
+${data.css || ''}
+
+:root {
+    --bg-app: #181818;
+    --text-main: #CCCCCC;
+    --text-muted: #858585;
+    --border-color: #2B2B2B;
+}
+
+/* Global Mobile Resets inside chat */
+#conversation, #conversation *, #chat, #chat *, #cascade, #cascade * {
+    box-sizing: border-box !important;
+    min-width: 0 !important;
+}
+
+[style*="container-type"], [class*="container-"] {
+    container-type: normal !important;
+}
+
+#conversation, #chat, #cascade {
+    background-color: transparent !important;
+    color: var(--text-main) !important;
+    font-family: 'Inter', system-ui, -apple-system, sans-serif !important;
+    font-size: 14.5px !important;
+    position: relative !important;
+    height: auto !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    display: block !important;
+    overflow-x: hidden !important;
+    padding-left: 0 !important;
+    padding-right: 0 !important;
+    margin-left: 0 !important;
+    margin-right: 0 !important;
+}
+
+#conversation > div,
+#conversation div[class*="overflow-"],
+#conversation div[class*="grow"],
+#conversation [tabindex="0"] {
+    height: auto !important;
+    min-height: 0 !important;
+    max-height: none !important;
+    overflow: visible !important;
+    flex: none !important;
+    display: block !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    padding-left: 2px !important;
+    padding-right: 2px !important;
+    margin-left: 0 !important;
+    margin-right: 0 !important;
+}
+
+#conversation p, #chat p, #cascade p,
+#conversation span, #chat span, #cascade span,
+#conversation div, #chat div, #cascade div,
+#conversation li, #chat li, #cascade li,
+#conversation h1, #chat h1, #cascade h1,
+#conversation h2, #chat h2, #cascade h2,
+#conversation h3, #chat h3, #cascade h3,
+#conversation h4, #chat h4, #cascade h4 {
+    color: inherit !important;
+    overflow-wrap: anywhere !important;
+    word-break: break-word !important;
+    max-width: 100% !important;
+}
+
+#conversation a, #chat a, #cascade a {
+    color: #60a5fa !important;
+    text-decoration: underline;
+    overflow-wrap: anywhere !important;
+    word-break: break-all !important;
+}
+
+/* User Message Bubble styling */
+[role="article"],
+[data-testid="user-input-step"],
+.group\/user-input-step {
+    width: 100% !important;
+    max-width: 100% !important;
+    box-sizing: border-box !important;
+    overflow: visible !important;
+}
+
+.whitespace-pre-wrap, .select-text, .leading-relaxed {
+    white-space: pre-wrap !important;
+    word-break: break-word !important;
+    overflow-wrap: anywhere !important;
+    max-width: 100% !important;
+}
+
+:not(pre) > code {
+    padding: 1px 4px !important;
+    border-radius: 3px !important;
+    background-color: rgba(255, 255, 255, 0.1) !important;
+    font-size: 0.88em !important;
+    font-family: 'JetBrains Mono', monospace !important;
+    word-break: break-all !important;
+    overflow-wrap: anywhere !important;
+    white-space: pre-wrap !important;
+    max-width: 100% !important;
+    display: inline !important;
+}
+
+pre, code, .monaco-editor-background {
+    background-color: #1a1a1a !important;
+    color: #e2e8f0 !important;
+    font-family: 'JetBrains Mono', monospace !important;
+    border-radius: 4px;
+    border: 1px solid #333333;
+}
+
+[class*="terminal"] {
+    background-color: #141414 !important;
+    color: #4ade80 !important;
+    font-family: 'JetBrains Mono', monospace !important;
+    border-radius: 4px;
+    border: 1px solid #2d2d2d;
+    max-height: 320px !important;
+    overflow-x: auto !important;
+    overflow-y: auto !important;
+    height: auto !important;
+    max-width: 100% !important;
+    box-sizing: border-box !important;
+}
+
+[class*="terminal"]:empty,
+[class*="terminal"]:not(:has(*)),
+[class*="xterm"]:empty,
+[class*="xterm"]:not(:has(*)) {
+    display: none !important;
+}
+
+pre {
+    position: relative !important;
+    white-space: pre-wrap !important; 
+    word-break: break-word !important;
+    overflow-wrap: anywhere !important;
+    padding: 8px 34px 8px 10px !important;
+    margin: 6px 0 !important;
+    display: block !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    box-sizing: border-box !important;
+    overflow-x: auto !important;
+}
+
+pre code {
+    white-space: pre-wrap !important;
+    word-break: break-word !important;
+    overflow-wrap: anywhere !important;
+    max-width: 100% !important;
+}
+
+pre.has-copy-btn {
+    padding-right: 36px !important;
+}
+
+.mobile-copy-btn {
+    position: absolute !important;
+    top: 4px !important;
+    right: 4px !important;
+    background: rgba(40, 40, 40, 0.8) !important;
+    color: #94a3b8 !important;
+    border: 1px solid #444 !important;
+    width: 26px !important; 
+    height: 26px !important;
+    padding: 0 !important;
+    cursor: pointer !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    border-radius: 4px !important;
+    transition: all 0.2s ease !important;
+    z-index: 10 !important;
+}
+
+.mobile-copy-btn:hover {
+    background: rgba(34, 197, 94, 0.2) !important;
+    color: #4ade80 !important;
+    border-color: #22c55e !important;
+}
+
+.mobile-copy-btn svg {
+    width: 14px !important;
+    height: 14px !important;
+    stroke: currentColor !important;
+    stroke-width: 2 !important;
+    fill: none !important;
+}
+
+/* Tables in markdown */
+table {
+    width: 100% !important;
+    max-width: 100% !important;
+    display: block !important;
+    overflow-x: auto !important;
+    border-collapse: collapse !important;
+    margin: 8px 0 !important;
+}
+
+table th, table td {
+    word-break: break-word !important;
+    overflow-wrap: anywhere !important;
+    padding: 4px 8px !important;
+}
+`;
         styleTag.textContent = darkModeOverrides;
         chatContent.innerHTML = data.html;
 
-
-        // Add mobile copy buttons to all code blocks
         addMobileCopyButtons();
 
-        // Action button enhancement removed — was too broad
-
-        // Smart scroll behavior: respect user scroll, only auto-scroll when appropriate
         if (isUserScrollLocked) {
-            // User recently scrolled - try to maintain their approximate position
-            // Use percentage-based restoration for better accuracy
             const scrollPercent = scrollHeight > 0 ? scrollPos / scrollHeight : 0;
-            const newScrollPos = chatContainer.scrollHeight * scrollPercent;
-            chatContainer.scrollTop = newScrollPos;
+            chatContainer.scrollTop = chatContainer.scrollHeight * scrollPercent;
         } else if (isNearBottom || scrollPos === 0) {
-            // User was at bottom or hasn't scrolled - auto scroll to bottom
             scrollToBottom();
-        } else {
-            // Preserve exact scroll position
-            chatContainer.scrollTop = scrollPos;
         }
-
-    } catch (err) {
-        console.error(err);
+    } catch (e) {
+        console.error('Snapshot error:', e);
     }
-}
-
-// --- Mobile Code Block Copy Functionality ---
-function addMobileCopyButtons() {
-    // Find all pre elements (code blocks) in the chat
-    const codeBlocks = chatContent.querySelectorAll('pre');
-
-    codeBlocks.forEach((pre, index) => {
-        // Skip if already has our button
-        if (pre.querySelector('.mobile-copy-btn')) return;
-
-        // Get the code text
-        const codeElement = pre.querySelector('code') || pre;
-        const textToCopy = (codeElement.textContent || codeElement.innerText).trim();
-
-        // Check if there's a newline character in the TRIMMED text
-        // This ensures single-line blocks with trailing newlines don't get buttons
-        const hasNewline = /\n/.test(textToCopy);
-
-        // If it's a single line code block, don't add the copy button
-        if (!hasNewline) {
-            pre.classList.remove('has-copy-btn');
-            pre.classList.add('single-line-pre');
-            return;
-        }
-
-        // Add class for padding
-        pre.classList.remove('single-line-pre');
-        pre.classList.add('has-copy-btn');
-
-        // Create the copy button (icon only)
-        const copyBtn = document.createElement('button');
-        copyBtn.className = 'mobile-copy-btn';
-        copyBtn.setAttribute('data-code-index', index);
-        copyBtn.setAttribute('aria-label', 'Copy code');
-        copyBtn.innerHTML = `
-            <svg viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round">
-                <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-            </svg>
-            `;
-
-        // Add click handler for copy
-        copyBtn.addEventListener('click', async (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-
-            const success = await copyToClipboard(textToCopy);
-
-            if (success) {
-                // Visual feedback - show checkmark
-                copyBtn.classList.add('copied');
-                copyBtn.innerHTML = `
-            <svg viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round">
-                <polyline points="20 6 9 17 4 12"></polyline>
-            </svg>
-            `;
-
-                // Reset after 2 seconds
-                setTimeout(() => {
-                    copyBtn.classList.remove('copied');
-                    copyBtn.innerHTML = `
-            <svg viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round">
-                            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-                            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-                        </svg>
-            `;
-                }, 2000);
-            } else {
-                // Show X icon briefly on error
-                copyBtn.innerHTML = `
-            <svg viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round">
-                        <line x1="18" y1="6" x2="6" y2="18"></line>
-                        <line x1="6" y1="6" x2="18" y2="18"></line>
-                    </svg>
-            `;
-                setTimeout(() => {
-                    copyBtn.innerHTML = `
-            <svg viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round">
-                            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-                            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-                        </svg>
-            `;
-                }, 2000);
-            }
-        });
-
-        // Insert button into pre element
-        pre.appendChild(copyBtn);
-    });
-}
-// enhanceActionButtons removed — was matching too many unrelated IDE buttons
-
-// --- Cross-platform Clipboard Copy ---
-async function copyToClipboard(text) {
-    // Method 1: Modern Clipboard API (works on HTTPS or localhost)
-    if (navigator.clipboard && window.isSecureContext) {
-        try {
-            await navigator.clipboard.writeText(text);
-            console.log('[COPY] Success via Clipboard API');
-            return true;
-        } catch (err) {
-            console.warn('[COPY] Clipboard API failed:', err);
-        }
-    }
-
-    // Method 2: Fallback using execCommand (works on HTTP, older browsers)
-    try {
-        const textArea = document.createElement('textarea');
-        textArea.value = text;
-
-        // Avoid scrolling to bottom on iOS
-        textArea.style.position = 'fixed';
-        textArea.style.top = '0';
-        textArea.style.left = '0';
-        textArea.style.width = '2em';
-        textArea.style.height = '2em';
-        textArea.style.padding = '0';
-        textArea.style.border = 'none';
-        textArea.style.outline = 'none';
-        textArea.style.boxShadow = 'none';
-        textArea.style.background = 'transparent';
-        textArea.style.opacity = '0';
-
-        document.body.appendChild(textArea);
-
-        // iOS specific handling
-        if (navigator.userAgent.match(/ipad|iphone/i)) {
-            const range = document.createRange();
-            range.selectNodeContents(textArea);
-            const selection = window.getSelection();
-            selection.removeAllRanges();
-            selection.addRange(range);
-            textArea.setSelectionRange(0, text.length);
-        } else {
-            textArea.select();
-        }
-
-        const success = document.execCommand('copy');
-        document.body.removeChild(textArea);
-
-        if (success) {
-            console.log('[COPY] Success via execCommand fallback');
-            return true;
-        }
-    } catch (err) {
-        console.warn('[COPY] execCommand fallback failed:', err);
-    }
-
-    // Method 3: For Android WebView or restricted contexts
-    // Show the text in a selectable modal if all else fails
-    console.error('[COPY] All copy methods failed');
-    return false;
 }
 
 function scrollToBottom() {
-    chatContainer.scrollTo({
-        top: chatContainer.scrollHeight,
-        behavior: 'smooth'
+    chatContainer.scrollTop = chatContainer.scrollHeight;
+}
+
+// --- Mobile Code Copy Buttons ---
+function addMobileCopyButtons() {
+    const codeBlocks = chatContent.querySelectorAll('pre');
+    codeBlocks.forEach(pre => {
+        if (pre.querySelector('.mobile-copy-btn')) return;
+        pre.classList.add('has-copy-btn');
+
+        const btn = document.createElement('button');
+        btn.className = 'mobile-copy-btn';
+        btn.setAttribute('aria-label', 'Copy code');
+        btn.innerHTML = `<svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`;
+
+        btn.onclick = (e) => {
+            e.stopPropagation();
+            const code = pre.querySelector('code')?.innerText || pre.innerText;
+            navigator.clipboard.writeText(code).then(() => {
+                btn.innerHTML = `<svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg>`;
+                btn.style.color = '#22c55e';
+                showToast('Code copied to clipboard');
+                setTimeout(() => {
+                    btn.innerHTML = `<svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`;
+                    btn.style.color = '';
+                }, 2000);
+            });
+        };
+        pre.appendChild(btn);
     });
 }
 
-// --- Inputs ---
-async function sendMessage() {
-    const message = messageInput.value.trim();
-    if (!message && pendingFiles.length === 0) return;
-
-    // Optimistic UI updates
-    const previousValue = messageInput.value;
-    messageInput.value = ''; // Clear immediately
-    messageInput.style.height = 'auto'; // Reset height
-    messageInput.blur(); // Close keyboard on mobile immediately
-
-    sendBtn.disabled = true;
-    sendBtn.style.opacity = '0.5';
-
-    try {
-        // If no chat is open, start a new one first
-        if (!chatIsOpen) {
-            const newChatRes = await fetchWithAuth('/new-chat', { method: 'POST' });
-            const newChatData = await newChatRes.json();
-            if (newChatData.success) {
-                // Wait for the new chat to be ready
-                await new Promise(r => setTimeout(r, 800));
-                chatIsOpen = true;
-            }
-        }
-
-        // Upload attached images first
-        if (pendingFiles.length > 0) {
-            for (const pf of pendingFiles) {
-                try {
-                    await fetchWithAuth('/upload-image', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ name: pf.name, dataUrl: pf.dataUrl })
-                    });
-                } catch (uploadErr) {
-                    console.warn('Image upload error:', uploadErr);
-                }
-            }
-            pendingFiles = [];
-            renderAttachPreviews();
-        }
-
-        // Send text message if present
-        if (message) {
-            const sendController = new AbortController();
-            const sendTimeout = setTimeout(() => sendController.abort(), 15000); // 15s timeout
-            try {
-                const res = await fetchWithAuth('/send', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ message }),
-                    signal: sendController.signal
-                });
-                clearTimeout(sendTimeout);
-
-                if (res.ok) {
-                    const data = await res.json();
-                    // Handle queued messages (agent is busy with terminal command)
-                    if (data.queued) {
-                        showToast(`📋 Message queued (#${data.queuePosition}) — agent is busy`, 4000);
-                    } else if (data.reason === 'queue_full') {
-                        showToast('⚠️ Queue full — agent is very busy, try again later', 4000);
-                        messageInput.value = message;
-                    } else if (data.reason === 'endpoint_timeout') {
-                        showToast('⏳ Server busy — message may still go through', 3000);
-                    }
-                } else if (res.status === 503) {
-                    showToast('⚠️ CDP disconnected — retrying...', 2000);
-                    // Retry once after 2s
-                    setTimeout(async () => {
-                        try {
-                            await fetchWithAuth('/send', {
-                                method: 'POST',
-                                headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify({ message })
-                            });
-                            showToast('✅ Message sent on retry', 2000);
-                            setTimeout(loadSnapshot, 500);
-                        } catch (e) {
-                            showToast('❌ Retry failed — check connection', 3000);
-                            messageInput.value = message;
-                        }
-                    }, 2000);
-                } else {
-                    console.warn('Send response not ok:', await res.json().catch(() => ({})));
-                }
-            } catch (fetchErr) {
-                clearTimeout(sendTimeout);
-                if (fetchErr.name === 'AbortError') {
-                    showToast('⏳ Send timed out — server may be busy', 3000);
-                } else {
-                    throw fetchErr; // Re-throw for outer catch
-                }
-            }
-        }
-
-        // Burst snapshot fetches — show agent "running" state quickly
-        setTimeout(loadSnapshot, 300);
-        setTimeout(loadSnapshot, 800);
-        setTimeout(loadSnapshot, 2000);
-        setTimeout(loadSnapshot, 4000);
-        setTimeout(loadSnapshot, 7000);
-        setTimeout(checkChatStatus, 1000);
-    } catch (e) {
-        // Network error - still try to refresh in case it went through
-        console.error('Send error:', e);
-        showToast('⚠️ Network error — retrying...', 2000);
-        // Retry once on network error
-        setTimeout(async () => {
-            try {
-                await fetchWithAuth('/send', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ message })
-                });
-                showToast('✅ Message sent on retry', 2000);
-            } catch (e2) {
-                messageInput.value = message;
-                showToast('❌ Send failed — message restored', 3000);
-            }
-        }, 2000);
-        setTimeout(loadSnapshot, 500);
-    } finally {
-        sendBtn.disabled = false;
-        sendBtn.style.opacity = '1';
-    }
-}
-
-// --- Event Listeners ---
-
-// Image attach handling
-const attachBtn = document.getElementById('attachBtn');
+// --- Image Attachment Handling ---
+let attachedImages = [];
 const fileInput = document.getElementById('fileInput');
+const attachBtn = document.getElementById('attachBtn');
 const attachPreview = document.getElementById('attachPreview');
 const attachPreviewInner = document.getElementById('attachPreviewInner');
-let pendingFiles = [];
 
-attachBtn.addEventListener('click', () => {
-    fileInput.click();
-});
-
-fileInput.addEventListener('change', (e) => {
-    const files = Array.from(e.target.files);
-    files.forEach(file => {
-        if (!file.type.startsWith('image/')) return;
-        const reader = new FileReader();
-        reader.onload = (ev) => {
-            pendingFiles.push({ name: file.name, dataUrl: ev.target.result, file });
-            renderAttachPreviews();
-        };
-        reader.readAsDataURL(file);
+if (attachBtn && fileInput) {
+    attachBtn.addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', async (e) => {
+        const files = Array.from(e.target.files);
+        for (const file of files) {
+            if (!file.type.startsWith('image/')) continue;
+            const reader = new FileReader();
+            reader.onload = (ev) => {
+                attachedImages.push({ file, dataUrl: ev.target.result });
+                renderAttachPreview();
+            };
+            reader.readAsDataURL(file);
+        }
+        fileInput.value = '';
     });
-    fileInput.value = ''; // Reset so same file can be selected again
-});
+}
 
-function renderAttachPreviews() {
-    if (pendingFiles.length === 0) {
+function renderAttachPreview() {
+    if (!attachPreview || !attachPreviewInner) return;
+    if (attachedImages.length === 0) {
         attachPreview.style.display = 'none';
+        attachPreviewInner.innerHTML = '';
         return;
     }
     attachPreview.style.display = 'block';
-    attachPreviewInner.innerHTML = '';
-    pendingFiles.forEach((f, idx) => {
-        const thumb = document.createElement('div');
-        thumb.className = 'attach-thumb';
-        thumb.innerHTML = `<img src="${f.dataUrl}" alt="${f.name}"/><button class="attach-thumb-remove" data-idx="${idx}">×</button>`;
-        thumb.querySelector('.attach-thumb-remove').addEventListener('click', (e) => {
-            e.stopPropagation();
-            pendingFiles.splice(idx, 1);
-            renderAttachPreviews();
-        });
-        attachPreviewInner.appendChild(thumb);
-    });
+    attachPreviewInner.innerHTML = attachedImages.map((img, idx) => `
+        <div class="attach-thumb">
+            <img src="${img.dataUrl}" alt="attachment" />
+            <button class="attach-thumb-remove" onclick="removeAttachedImage(${idx})">×</button>
+        </div>
+    `).join('');
 }
 
-sendBtn.addEventListener('click', sendMessage);
+window.removeAttachedImage = function (idx) {
+    attachedImages.splice(idx, 1);
+    renderAttachPreview();
+};
 
-refreshBtn.addEventListener('click', async () => {
-    // Restart IDE: Kill antigravity and relaunch with --remote-debugging-port=9222
-    if (!confirm('Restart IDE?\n\nThis will shut down Antigravity and relaunch it with debug port 9222.')) return;
+// --- Send Message ---
+async function sendMessage() {
+    const text = messageInput.value.trim();
+    if (!text && attachedImages.length === 0) return;
 
-    refreshBtn.textContent = '⏳ Restarting...';
-    refreshBtn.disabled = true;
-    refreshBtn.style.opacity = '0.5';
+    sendBtn.disabled = true;
+    messageInput.disabled = true;
 
     try {
-        const res = await fetchWithAuth('/restart-ide', { method: 'POST' });
-        const data = await res.json();
-
-        if (data.success) {
-            // Show countdown while IDE restarts
-            let countdown = 15;
-            chatContent.innerHTML = `
-                <div class="empty-state">
-                    <svg class="empty-state-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-                        <path d="M23 4v6h-6M1 20v-6h6"></path>
-                        <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
-                    </svg>
-                    <h2>IDE Restarting...</h2>
-                    <p>antigravity --remote-debugging-port=9222</p>
-                    <p id="restartCountdown" style="font-size: 24px; font-weight: 600; color: #22c55e;">⏳ ${countdown}s</p>
-                </div>
-            `;
-
-            const countdownEl = document.getElementById('restartCountdown');
-            const timer = setInterval(() => {
-                countdown--;
-                if (countdownEl) countdownEl.textContent = `⏳ ${countdown}s`;
-                if (countdown <= 0) {
-                    clearInterval(timer);
-                    // Try to reconnect
-                    refreshBtn.textContent = '↻ Restart IDE';
-                    refreshBtn.disabled = false;
-                    refreshBtn.style.opacity = '1';
-                    loadSnapshot();
-                    fetchAppState();
+        // Upload images first if any
+        for (const img of attachedImages) {
+            try {
+                const res = await fetchWithAuth('/upload-image', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        name: img.file ? img.file.name : 'image.png',
+                        dataUrl: img.dataUrl
+                    })
+                });
+                const uData = await res.json();
+                if (uData.error) {
+                    console.warn('Image upload error:', uData.error);
+                    showToast('Image upload: ' + uData.error);
                 }
-            }, 1000);
-        } else {
-            alert('Restart failed: ' + (data.error || 'Unknown error'));
-            refreshBtn.textContent = '↻ Restart IDE';
-            refreshBtn.disabled = false;
-            refreshBtn.style.opacity = '1';
+            } catch (imgErr) {
+                console.error('Failed to upload image:', imgErr);
+            }
         }
-    } catch (e) {
-        console.error('Restart IDE error:', e);
-        alert('Failed to restart IDE: ' + e.message);
-        refreshBtn.textContent = '↻ Restart IDE';
-        refreshBtn.disabled = false;
-        refreshBtn.style.opacity = '1';
-    }
-});
+        attachedImages = [];
+        renderAttachPreview();
 
-messageInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-        e.preventDefault();
-        sendMessage();
-    }
-});
-
-messageInput.addEventListener('input', function () {
-    this.style.height = 'auto';
-    this.style.height = (this.scrollHeight) + 'px';
-});
-
-// --- Scroll Sync to Desktop ---
-let scrollSyncTimeout = null;
-let lastScrollSync = 0;
-const SCROLL_SYNC_DEBOUNCE = 150; // ms between scroll syncs
-let snapshotReloadPending = false;
-
-async function syncScrollToDesktop() {
-    const scrollPercent = chatContainer.scrollTop / (chatContainer.scrollHeight - chatContainer.clientHeight);
-    try {
-        await fetchWithAuth('/remote-scroll', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ scrollPercent })
-        });
-
-        // After scrolling desktop, reload snapshot to get newly visible content
-        // (Antigravity uses virtualized scrolling - only visible messages are in DOM)
-        if (!snapshotReloadPending) {
-            snapshotReloadPending = true;
-            setTimeout(() => {
-                loadSnapshot();
-                snapshotReloadPending = false;
-            }, 300);
+        if (text) {
+            const res = await fetchWithAuth('/send', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ message: text })
+            });
+            const data = await res.json();
+            if (data.error) {
+                showToast('Error: ' + data.error);
+            }
         }
+
+        messageInput.value = '';
+        messageInput.style.height = 'auto';
+        setTimeout(loadSnapshot, 300);
+        setTimeout(loadSnapshot, 1000);
     } catch (e) {
-        console.log('Scroll sync failed:', e.message);
+        showToast('Failed to send: ' + e.message);
+    } finally {
+        sendBtn.disabled = false;
+        messageInput.disabled = false;
+        messageInput.focus();
     }
 }
 
-chatContainer.addEventListener('scroll', () => {
-    userIsScrolling = true;
-    // Set a lock to prevent auto-scroll jumping for a few seconds
-    userScrollLockUntil = Date.now() + USER_SCROLL_LOCK_DURATION;
-    clearTimeout(idleTimer);
-
-    const isNearBottom = chatContainer.scrollHeight - chatContainer.scrollTop - chatContainer.clientHeight < 120;
-    if (isNearBottom) {
-        scrollToBottomBtn.classList.remove('show');
-        // If user scrolled to bottom, clear the lock so auto-scroll works
-        userScrollLockUntil = 0;
-    } else {
-        scrollToBottomBtn.classList.add('show');
-    }
-
-    // Debounced scroll sync to desktop
-    const now = Date.now();
-    if (now - lastScrollSync > SCROLL_SYNC_DEBOUNCE) {
-        lastScrollSync = now;
-        clearTimeout(scrollSyncTimeout);
-        scrollSyncTimeout = setTimeout(syncScrollToDesktop, 100);
-    }
-
-    idleTimer = setTimeout(() => {
-        userIsScrolling = false;
-        autoRefreshEnabled = true;
-    }, 5000);
-});
-
-scrollToBottomBtn.addEventListener('click', () => {
-    userIsScrolling = false;
-    userScrollLockUntil = 0; // Clear lock so auto-scroll works again
-    scrollToBottom();
-});
-
-// --- Quick Actions ---
-function quickAction(text) {
-    messageInput.value = text;
-    messageInput.style.height = 'auto';
-    messageInput.style.height = messageInput.scrollHeight + 'px';
-    messageInput.focus();
-}
-
-// --- Stop Logic ---
-stopBtn.addEventListener('click', async () => {
-    stopBtn.style.opacity = '0.5';
-    try {
-        const res = await fetchWithAuth('/stop', { method: 'POST' });
-        const data = await res.json();
-        if (data.success) {
-            // alert('Stopped');
-        } else {
-            // alert('Error: ' + data.error);
-        }
-    } catch (e) { }
-    setTimeout(() => stopBtn.style.opacity = '1', 500);
-});
+if (sendBtn) sendBtn.addEventListener('click', sendMessage);
 
 // --- New Chat Logic ---
 async function startNewChat() {
     newChatBtn.style.opacity = '0.5';
     newChatBtn.style.pointerEvents = 'none';
+    showToast('✨ Starting new conversation...');
+
+    // Optimistic UI state
+    currentChatTitle = 'New Conversation';
+    if (activeChatTitle) activeChatTitle.textContent = 'New Conversation';
+
+    chatContent.innerHTML = `
+        <div class="loading-state">
+            <div class="loading-spinner"></div>
+            <p>Creating fresh session...</p>
+        </div>
+    `;
 
     try {
         const res = await fetchWithAuth('/new-chat', { method: 'POST' });
         const data = await res.json();
 
         if (data.success) {
-            // Reload snapshot to show new empty chat
-            setTimeout(loadSnapshot, 500);
-            setTimeout(loadSnapshot, 1000);
-            setTimeout(checkChatStatus, 1500);
+            showToast('✅ New conversation ready');
+            setTimeout(loadSnapshot, 400);
+            setTimeout(loadSnapshot, 1200);
+            setTimeout(checkChatStatus, 1600);
         } else {
-            console.error('Failed to start new chat:', data.error);
+            showToast('Failed to start new chat: ' + (data.error || 'Unknown'));
         }
     } catch (e) {
-        console.error('New chat error:', e);
-    }
-
-    setTimeout(() => {
+        showToast('New chat error: ' + e.message);
+    } finally {
         newChatBtn.style.opacity = '1';
         newChatBtn.style.pointerEvents = 'auto';
-    }, 500);
+        messageInput.focus();
+    }
 }
 
-newChatBtn.addEventListener('click', startNewChat);
+function startNewChatFromHistory() {
+    hideChatHistory();
+    startNewChat();
+}
+
+if (newChatBtn) newChatBtn.addEventListener('click', startNewChat);
 
 // --- Chat History Logic ---
 async function showChatHistory() {
-    const historyLayer = document.getElementById('historyLayer');
-    const historyList = document.getElementById('historyList');
-
-    // Show loading state
-    historyList.innerHTML = `<div style="padding: 40px 20px; text-align: center; color: var(--text-muted);"><div class="loading-spinner" style="margin: 0 auto 12px;"></div><p>Loading conversations...</p></div>`;
     historyLayer.classList.add('show');
+    if (historySearchInput) {
+        historySearchInput.value = '';
+        if (clearSearchBtn) clearSearchBtn.style.display = 'none';
+    }
+
+    if (cachedConversations.length > 0) {
+        renderHistoryList(cachedConversations);
+    } else {
+        historyList.innerHTML = `
+            <div style="padding: 40px 20px; text-align: center; color: var(--text-muted);">
+                <div class="loading-spinner" style="margin: 0 auto 12px;"></div>
+                <p>Loading conversations...</p>
+            </div>
+        `;
+    }
+
+    refreshChatHistory(false);
+}
+
+async function refreshChatHistory(showSpinner = true) {
+    const refreshIcon = document.getElementById('historyRefreshBtn');
+    if (refreshIcon && showSpinner) {
+        refreshIcon.style.transform = 'rotate(360deg)';
+        refreshIcon.style.transition = 'transform 0.5s';
+        setTimeout(() => { refreshIcon.style.transform = ''; }, 500);
+    }
 
     try {
         const res = await fetchWithAuth('/chat-history');
         const data = await res.json();
 
-        if (data.error || !data.chats || data.chats.length === 0) {
+        if (data.success && Array.isArray(data.chats)) {
+            cachedConversations = data.chats;
+            updateConversationBadges(cachedConversations.length);
+            renderHistoryList(cachedConversations, historySearchInput?.value || '');
+        } else if (cachedConversations.length === 0) {
             historyList.innerHTML = `
                 <div style="padding: 40px 20px; text-align: center; color: var(--text-muted);">
-                    <div style="font-size: 24px; margin-bottom: 10px;">💬</div>
-                    <div style="font-weight: 500; margin-bottom: 5px;">No conversations found</div>
-                    <div style="font-size: 13px; opacity: 0.7;">${data.error || 'Start a new chat to get going!'}</div>
-                    <br>
-                    <div class="history-item new-chat-item" onclick="hideChatHistory(); startNewChat();" style="justify-content: center; background: var(--accent); color: white; border:none; border-radius: 8px; margin-top: 10px;">
-                        Start New Conversation
+                    <div style="font-size: 28px; margin-bottom: 8px;">💬</div>
+                    <div style="font-weight: 600; color: #eee; margin-bottom: 4px;">No conversations found</div>
+                    <div style="font-size: 13px; opacity: 0.7;">Start a new conversation to begin.</div>
+                    <div class="new-chat-card-pinned" onclick="startNewChatFromHistory()" style="margin-top: 16px;">
+                        ＋ Start New Conversation
                     </div>
                 </div>
             `;
-            return;
         }
-
-        let html = `
-            <div class="history-item new-chat-item" onclick="hideChatHistory(); startNewChat();" style="justify-content: center; background: rgba(34, 197, 94, 0.2); color: #22c55e; border: 1px solid rgba(34, 197, 94, 0.3); border-radius: 8px; margin: 8px 16px;">
-                ＋ New Conversation
-            </div>
-        `;
-
-        data.chats.forEach(chat => {
-            const title = chat.title || chat.name || 'Untitled';
-            const escapedTitle = title.replace(/'/g, "\\'").replace(/"/g, '&quot;');
-            html += `
-                <div class="history-item" onclick="hideChatHistory(); selectChat('${escapedTitle}');">
-                    <div class="history-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></div>
-                    <div class="history-item-text">
-                        <div class="history-item-title">${title}</div>
-                    </div>
+    } catch (e) {
+        if (cachedConversations.length === 0) {
+            historyList.innerHTML = `
+                <div style="padding: 40px 20px; text-align: center; color: var(--text-muted);">
+                    <div style="font-size: 24px; margin-bottom: 8px;">⚠️</div>
+                    <div style="font-weight: 500;">Connection Error</div>
+                    <div style="font-size: 13px; opacity: 0.7; margin-top: 4px;">Could not load history: ${e.message}</div>
                 </div>
             `;
-        });
+        }
+    }
+}
 
-        historyList.innerHTML = html;
-    } catch (e) {
-        console.error('History fetch error:', e);
-        historyList.innerHTML = `
-            <div style="padding: 40px 20px; text-align: center; color: var(--text-muted);">
-                <div style="font-size: 24px; margin-bottom: 10px;">⚠️</div>
-                <div style="font-weight: 500;">Connection Error</div>
-                <div style="font-size: 13px; opacity: 0.7; margin-top: 5px;">Could not load history: ${e.message}</div>
+function updateConversationBadges(count) {
+    if (historyCountBadge) {
+        historyCountBadge.textContent = count;
+        historyCountBadge.style.display = count > 0 ? 'inline-block' : 'none';
+    }
+    if (drawerCountTag) {
+        drawerCountTag.textContent = count;
+    }
+}
+
+function renderHistoryList(chats, filterText = '') {
+    const query = filterText.trim().toLowerCase();
+    const filtered = query
+        ? chats.filter(c => (c.title || c.name || '').toLowerCase().includes(query))
+        : chats;
+
+    let html = `
+        <div class="new-chat-card-pinned" onclick="startNewChatFromHistory()">
+            <span>＋ Start New Conversation</span>
+        </div>
+    `;
+
+    if (filtered.length === 0) {
+        html += `
+            <div style="padding: 30px 16px; text-align: center; color: var(--text-muted);">
+                <div style="font-size: 20px; margin-bottom: 6px;">🔍</div>
+                <div style="font-size: 13px;">No conversations matching "${escapeHtml(filterText)}"</div>
             </div>
         `;
+        historyList.innerHTML = html;
+        return;
     }
-    setTimeout(() => historyBtn.style.opacity = '1', 300);
+
+    filtered.forEach(chat => {
+        const title = chat.title || chat.name || 'Untitled';
+        const escapedTitle = title.replace(/'/g, "\\'").replace(/"/g, '&quot;');
+        const isActive = currentChatTitle && (
+            currentChatTitle.toLowerCase() === title.toLowerCase() ||
+            title.toLowerCase().startsWith(currentChatTitle.toLowerCase().slice(0, 15))
+        );
+
+        html += `
+            <div class="history-item ${isActive ? 'active-chat-item' : ''}" onclick="selectChat('${escapedTitle}', this)">
+                <div class="history-item-icon">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+                    </svg>
+                </div>
+                <div class="history-item-text">
+                    <div class="history-item-title">${escapeHtml(title)}</div>
+                    <div class="history-item-date">
+                        ${isActive ? '<span class="active-pill-indicator">Active</span>' : ''}
+                        <span>${escapeHtml(chat.date || 'Recent')}</span>
+                    </div>
+                </div>
+            </div>
+        `;
+    });
+
+    historyList.innerHTML = html;
+}
+
+// History Search Input
+if (historySearchInput) {
+    historySearchInput.addEventListener('input', (e) => {
+        const val = e.target.value;
+        if (clearSearchBtn) clearSearchBtn.style.display = val ? 'block' : 'none';
+        renderHistoryList(cachedConversations, val);
+    });
+}
+
+function clearHistorySearch() {
+    if (historySearchInput) historySearchInput.value = '';
+    if (clearSearchBtn) clearSearchBtn.style.display = 'none';
+    renderHistoryList(cachedConversations, '');
 }
 
 function hideChatHistory() {
     historyLayer.classList.remove('show');
 }
 
-historyBtn.addEventListener('click', showChatHistory);
+if (historyBtn) historyBtn.addEventListener('click', showChatHistory);
 
 // --- Select Chat from History ---
-async function selectChat(title) {
+async function selectChat(title, element) {
+    if (element) {
+        element.style.opacity = '0.6';
+        element.querySelector('.history-item-icon').innerHTML = '<div class="loading-spinner" style="width:16px;height:16px;border-width:2px;"></div>';
+    }
+
+    currentChatTitle = title;
+    if (activeChatTitle) activeChatTitle.textContent = title;
+
     try {
         const res = await fetchWithAuth('/select-chat', {
             method: 'POST',
@@ -1045,60 +804,205 @@ async function selectChat(title) {
         const data = await res.json();
 
         if (data.success) {
+            hideChatHistory();
+            showToast(`Switched to: ${title}`);
+            chatContent.innerHTML = `
+                <div class="loading-state">
+                    <div class="loading-spinner"></div>
+                    <p>Loading ${escapeHtml(title)}...</p>
+                </div>
+            `;
             setTimeout(loadSnapshot, 300);
             setTimeout(loadSnapshot, 800);
-            setTimeout(checkChatStatus, 1000);
+            setTimeout(loadSnapshot, 1500);
         } else {
-            console.error('Failed to select chat:', data.error);
+            showToast('Could not switch: ' + (data.error || 'Unknown error'));
         }
     } catch (e) {
-        console.error('Select chat error:', e);
+        showToast('Select chat error: ' + e.message);
     }
 }
 
-// --- Check Chat Status ---
-async function checkChatStatus() {
+// --- Restart IDE & Reconnect Modals ---
+function showRestartModal() {
+    if (restartModalOverlay) restartModalOverlay.classList.add('show');
+}
+
+function closeRestartModal() {
+    if (restartModalOverlay) restartModalOverlay.classList.remove('show');
+}
+
+if (refreshBtn) refreshBtn.addEventListener('click', showRestartModal);
+
+if (restartModalOverlay) {
+    restartModalOverlay.onclick = (e) => {
+        if (e.target === restartModalOverlay) closeRestartModal();
+    };
+}
+
+async function confirmRestartIDE() {
+    closeRestartModal();
+    if (restartProgressOverlay) restartProgressOverlay.style.display = 'flex';
+
+    let secondsLeft = 12;
+    if (restartCountdownVal) restartCountdownVal.textContent = `⏳ ${secondsLeft}s`;
+
+    const stepKill = document.getElementById('stepKill');
+    const stepLaunch = document.getElementById('stepLaunch');
+    const stepDiscover = document.getElementById('stepDiscover');
+    const stepConnect = document.getElementById('stepConnect');
+
+    if (stepKill) stepKill.className = 'restart-step-item active';
+    if (stepLaunch) stepLaunch.className = 'restart-step-item';
+    if (stepDiscover) stepDiscover.className = 'restart-step-item';
+    if (stepConnect) stepConnect.className = 'restart-step-item';
+
     try {
-        const res = await fetchWithAuth('/chat-status');
+        await fetchWithAuth('/restart-ide', { method: 'POST' });
+    } catch (e) {
+        console.warn('Restart trigger error:', e.message);
+    }
+
+    const timer = setInterval(() => {
+        secondsLeft--;
+        if (restartCountdownVal) restartCountdownVal.textContent = `⏳ ${secondsLeft}s`;
+
+        if (secondsLeft === 9) {
+            if (stepKill) stepKill.className = 'restart-step-item done';
+            if (stepLaunch) stepLaunch.className = 'restart-step-item active';
+        } else if (secondsLeft === 6) {
+            if (stepLaunch) stepLaunch.className = 'restart-step-item done';
+            if (stepDiscover) stepDiscover.className = 'restart-step-item active';
+        } else if (secondsLeft === 3) {
+            if (stepDiscover) stepDiscover.className = 'restart-step-item done';
+            if (stepConnect) stepConnect.className = 'restart-step-item active';
+        }
+
+        if (secondsLeft <= 0) {
+            clearInterval(timer);
+            if (stepConnect) stepConnect.className = 'restart-step-item done';
+            if (restartProgressOverlay) restartProgressOverlay.style.display = 'none';
+            showToast('✅ IDE restart complete');
+            loadSnapshot();
+            fetchAppState();
+        }
+    }, 1000);
+}
+
+async function executeQuickReconnect() {
+    closeRestartModal();
+    showToast('⏳ Reconnecting DevTools CDP...');
+
+    try {
+        const res = await fetchWithAuth('/reconnect-cdp', { method: 'POST' });
         const data = await res.json();
-
-        chatIsOpen = data.hasChat || data.editorFound;
-
-        if (!chatIsOpen) {
-            showEmptyState();
+        if (data.success) {
+            showToast('✅ CDP Reconnected successfully');
+            loadSnapshot();
+            fetchAppState();
+        } else {
+            showToast('Reconnect failed: ' + (data.error || 'Not found'));
         }
     } catch (e) {
-        console.error('Chat status check failed:', e);
+        showToast('Reconnect error: ' + e.message);
     }
 }
 
-// --- Empty State (No Chat Open) ---
+// --- Empty State ---
 function showEmptyState() {
     chatContent.innerHTML = `
-        <div class="empty-state">
-            <svg class="empty-state-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+        <div class="loading-state">
+            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" style="color: var(--text-muted); opacity: 0.6; margin-bottom: 8px;">
                 <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
-                <line x1="9" y1="10" x2="15" y2="10"></line>
             </svg>
-            <h2>No Chat Open</h2>
-            <p>Start a new conversation or select one from your history to begin chatting.</p>
-            <button class="empty-state-btn" onclick="startNewChat()">
-                Start New Conversation
+            <h2 style="font-size: 16px; color: #f1f5f9; margin-bottom: 6px;">No Conversation Open</h2>
+            <p style="font-size: 13px; color: var(--text-muted); max-width: 260px; line-height: 1.4; margin-bottom: 16px;">
+                Start a fresh conversation or pick one from history to chat with the agent.
+            </p>
+            <button class="new-chat-btn" onclick="startNewChat()" style="padding: 8px 18px; font-size: 13px;">
+                ＋ Start New Conversation
             </button>
         </div>
     `;
 }
 
-// --- Utility: Escape HTML ---
 function escapeHtml(text) {
+    if (!text) return '';
     const div = document.createElement('div');
     div.textContent = text;
     return div.innerHTML;
 }
 
-// --- Settings Logic ---
+// --- Quick Actions ---
+function quickAction(text) {
+    messageInput.value = text;
+    messageInput.style.height = 'auto';
+    messageInput.style.height = messageInput.scrollHeight + 'px';
+    messageInput.focus();
+}
 
+// --- Stop Button Logic ---
+if (stopBtn) {
+    stopBtn.addEventListener('click', async () => {
+        stopBtn.style.opacity = '0.5';
+        showToast('■ Stopping generation...');
+        try {
+            const res = await fetchWithAuth('/stop', { method: 'POST' });
+            const data = await res.json();
+            if (data.success) {
+                showToast('Agent stopped');
+            }
+        } catch (e) { }
+        setTimeout(() => { stopBtn.style.opacity = '1'; }, 500);
+    });
+}
 
+// --- Keyboard input auto-resize & submit ---
+if (messageInput) {
+    messageInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            sendMessage();
+        }
+    });
+
+    messageInput.addEventListener('input', function () {
+        this.style.height = 'auto';
+        this.style.height = (this.scrollHeight) + 'px';
+    });
+}
+
+// --- Scroll Handling ---
+if (chatContainer) {
+    chatContainer.addEventListener('scroll', () => {
+        userIsScrolling = true;
+        userScrollLockUntil = Date.now() + USER_SCROLL_LOCK_DURATION;
+        clearTimeout(idleTimer);
+
+        const isNearBottom = chatContainer.scrollHeight - chatContainer.scrollTop - chatContainer.clientHeight < 120;
+        if (isNearBottom) {
+            if (scrollToBottomBtn) scrollToBottomBtn.classList.remove('show');
+            userScrollLockUntil = 0;
+        } else {
+            if (scrollToBottomBtn) scrollToBottomBtn.classList.add('show');
+        }
+
+        idleTimer = setTimeout(() => {
+            userIsScrolling = false;
+            autoRefreshEnabled = true;
+        }, 5000);
+    });
+}
+
+if (scrollToBottomBtn) {
+    scrollToBottomBtn.addEventListener('click', () => {
+        userIsScrolling = false;
+        userScrollLockUntil = 0;
+        scrollToBottom();
+    });
+}
+
+// --- Settings Modal ---
 function openModal(title, options, onSelect) {
     modalTitle.textContent = title;
     modalList.innerHTML = '';
@@ -1119,160 +1023,148 @@ function closeModal() {
     modalOverlay.classList.remove('show');
 }
 
-modalOverlay.onclick = (e) => {
-    if (e.target === modalOverlay) closeModal();
-};
+if (modalOverlay) {
+    modalOverlay.onclick = (e) => {
+        if (e.target === modalOverlay) closeModal();
+    };
+}
 
-modeBtn.addEventListener('click', () => {
-    openModal('Select Mode', ['Fast', 'Planning'], async (mode) => {
-        modeText.textContent = 'Setting...';
-        try {
-            const res = await fetchWithAuth('/set-mode', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ mode })
-            });
-            const data = await res.json();
-            if (data.success) {
-                currentMode = mode;
-                modeText.textContent = mode;
-                modeBtn.classList.toggle('active', mode === 'Planning');
-            } else {
-                alert('Error: ' + (data.error || 'Unknown'));
+if (modeBtn) {
+    modeBtn.addEventListener('click', () => {
+        openModal('Select Mode', ['Fast', 'Planning'], async (mode) => {
+            modeText.textContent = 'Setting...';
+            try {
+                const res = await fetchWithAuth('/set-mode', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ mode })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    currentMode = mode;
+                    modeText.textContent = mode;
+                    modeBtn.classList.toggle('active', mode === 'Planning');
+                } else {
+                    modeText.textContent = currentMode;
+                }
+            } catch (e) {
                 modeText.textContent = currentMode;
             }
-        } catch (e) {
-            modeText.textContent = currentMode;
-        }
+        });
     });
-});
+}
 
-modelBtn.addEventListener('click', () => {
-    openModal('Select Model', MODELS, async (model) => {
-        const prev = modelText.textContent;
-        modelText.textContent = 'Setting...';
-        try {
-            const res = await fetchWithAuth('/set-model', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ model })
-            });
-            const data = await res.json();
-            if (data.success) {
-                modelText.textContent = model;
-            } else {
-                alert('Error: ' + (data.error || 'Unknown'));
+if (modelBtn) {
+    modelBtn.addEventListener('click', () => {
+        openModal('Select Model', MODELS, async (model) => {
+            const prev = modelText.textContent;
+            modelText.textContent = 'Setting...';
+            try {
+                const res = await fetchWithAuth('/set-model', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ model })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    modelText.textContent = model;
+                } else {
+                    modelText.textContent = prev;
+                }
+            } catch (e) {
                 modelText.textContent = prev;
             }
-        } catch (e) {
-            modelText.textContent = prev;
-        }
+        });
     });
-});
+}
 
 // --- Viewport / Keyboard Handling ---
-// This fixes the issue where the keyboard hides the input or layout breaks
 if (window.visualViewport) {
     function handleResize() {
-        // Resize the body to match the visual viewport (screen minus keyboard)
         document.body.style.height = window.visualViewport.height + 'px';
-
-        // Scroll to bottom if keyboard opened
         if (document.activeElement === messageInput) {
             setTimeout(scrollToBottom, 100);
         }
     }
-
     window.visualViewport.addEventListener('resize', handleResize);
     window.visualViewport.addEventListener('scroll', handleResize);
-    handleResize(); // Init
-} else {
-    // Fallback for older browsers without visualViewport support
-    window.addEventListener('resize', () => {
-        document.body.style.height = window.innerHeight + 'px';
-    });
-    document.body.style.height = window.innerHeight + 'px'; // Init
+    handleResize();
 }
 
 // --- Remote Click Logic (Thinking/Thought + Action Buttons) ---
 chatContainer.addEventListener('click', async (e) => {
-    const target = e.target.closest('div, span, p, summary, button, details');
-    if (!target) return;
-
-    const text = (target.innerText || '').trim();
-
-    // === ACTION BUTTON DETECTION ===
-    // Check if clicked element is an action/approval button (Run, Accept, Allow, Approve, etc.)
     const actionBtn = e.target.closest('button, [role="button"]');
     if (actionBtn) {
         const btnText = (actionBtn.innerText || actionBtn.textContent || '').trim();
         const isActionButton = /^(Run|Accept|Allow|Approve|Yes|OK|Confirm|Save|Apply|Execute|Continue|Proceed|Deny|Reject|Cancel)$/i.test(btnText) ||
-            /^(Run Command|Run command|Accept All|Allow All|Allow Once|Allow This Conversation|Accept Changes|Approve All)$/i.test(btnText) ||
-            actionBtn.classList.contains('gr-action-btn') ||
-            actionBtn.getAttribute('data-testid')?.match(/(approve|accept|run|allow|deny|reject)/i);
+            /^(Run Command|Accept All|Allow All|Allow Once|Accept Changes|Approve All)$/i.test(btnText);
 
         if (isActionButton) {
-            console.log('[ACTION] Approval button clicked:', btnText);
-            // Visual feedback
             actionBtn.style.opacity = '0.5';
-            actionBtn.style.transform = 'scale(0.95)';
-            setTimeout(() => {
-                actionBtn.style.opacity = '1';
-                actionBtn.style.transform = '';
-            }, 400);
+            setTimeout(() => { actionBtn.style.opacity = '1'; }, 400);
 
             try {
-                const response = await fetchWithAuth('/approve-action', {
+                await fetchWithAuth('/approve-action', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ buttonText: btnText })
                 });
-                const data = await response.json();
-                console.log('[ACTION] Approve result:', data);
-
-                // Reload snapshot to see updated state
                 setTimeout(loadSnapshot, 500);
-                setTimeout(loadSnapshot, 1200);
-                setTimeout(loadSnapshot, 2500);
-            } catch (err) {
-                console.error('[ACTION] Approve failed:', err);
-            }
-            return; // Don't fall through to thought toggle logic
+                setTimeout(loadSnapshot, 1500);
+            } catch (err) { }
+            return;
         }
     }
 
-    // === THOUGHT TOGGLE DETECTION ===
-    const isThoughtToggle = /Thought|Thinking/i.test(text) && text.length < 500;
-    if (isThoughtToggle) {
-        target.style.opacity = '0.5';
-        setTimeout(() => target.style.opacity = '1', 300);
-
-        const firstLine = text.split('\n')[0].trim();
-        try {
-            const response = await fetchWithAuth('/remote-click', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    selector: target.tagName.toLowerCase(),
-                    index: 0,
-                    textContent: firstLine
-                })
-            });
-            setTimeout(loadSnapshot, 400);
-            setTimeout(loadSnapshot, 800);
-            setTimeout(loadSnapshot, 1500);
-        } catch (e) {
-            console.error('Remote click failed:', e);
+    const target = e.target.closest('div, span, p, summary, details');
+    if (target) {
+        const text = (target.innerText || '').trim();
+        if (/Thought|Thinking/i.test(text) && text.length < 500) {
+            target.style.opacity = '0.5';
+            setTimeout(() => target.style.opacity = '1', 300);
+            const firstLine = text.split('\n')[0].trim();
+            try {
+                await fetchWithAuth('/remote-click', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        selector: target.tagName.toLowerCase(),
+                        index: 0,
+                        textContent: firstLine
+                    })
+                });
+                setTimeout(loadSnapshot, 400);
+                setTimeout(loadSnapshot, 1000);
+            } catch (e) { }
         }
     }
 });
 
+// Check chat status
+async function checkChatStatus() {
+    try {
+        const res = await fetchWithAuth('/chat-status');
+        const data = await res.json();
+        chatIsOpen = data.hasChat || data.editorFound;
+        if (!chatIsOpen) showEmptyState();
+    } catch (e) { }
+}
+
+// Prefetch conversations count on boot
+async function prefetchHistory() {
+    try {
+        const res = await fetchWithAuth('/chat-history');
+        const data = await res.json();
+        if (data.success && Array.isArray(data.chats)) {
+            cachedConversations = data.chats;
+            updateConversationBadges(cachedConversations.length);
+        }
+    } catch (e) { }
+}
+
 // --- Init ---
 connectWebSocket();
-// Sync state initially and every 5 seconds to keep phone in sync with desktop changes
 fetchAppState();
 setInterval(fetchAppState, 5000);
-
-// Check chat status initially and periodically
 checkChatStatus();
-setInterval(checkChatStatus, 10000); // Check every 10 seconds
+prefetchHistory();

@@ -3,31 +3,35 @@
 
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Antigravity Phone Connect</title>
+    <meta name="viewport"
+        content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>Antigravity Remote</title>
+    <!-- Fonts -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link
-        href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap"
+        href="https://fonts.googleapis.com/css2?family=Amiri:ital,wght@0,400;0,700;1,400&family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
         rel="stylesheet">
-    <link rel="stylesheet" href="css/style.css">
+    <link rel="stylesheet" href="css/style.css?v=2.4">
+    <link rel="icon"
+        href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>⚡</text></svg>">
 </head>
 
 <body>
-    <!-- GravityRemote Header -->
-    <header class="header gr-header">
-        <div class="gr-brand" onclick="toggleHeaderCollapse()">◆ GRAVITYREMOTE</div>
+    <!-- Top Header -->
+    <header class="gr-header">
+        <div class="gr-brand" id="grBrand" onclick="toggleHeaderCollapse()" title="Double-tap top header to toggle compact view with only Lisan banner">AGRAVITY</div>
         <div class="header-controls">
-            <div class="gr-stat-compact">
+            <div class="gr-stat-compact" title="System CPU usage">
                 <span class="gr-stat-label">CPU</span>
                 <span class="gr-stat-val" id="cpuStat">--%</span>
             </div>
-            <div class="gr-stat-compact">
+            <div class="gr-stat-compact" title="System RAM usage">
                 <span class="gr-stat-label">RAM</span>
-                <span class="gr-stat-val" id="ramStat">--MB</span>
+                <span class="gr-stat-val" id="ramStat">--GB</span>
             </div>
             <span class="gr-agent-badge">Agent</span>
-            <div class="status-badge">
+            <div class="status-badge" id="statusBadge" onclick="showRestartModal()" title="Connection status - Tap to reconnect">
                 <div class="status-dot disconnected" id="statusDot"></div>
                 <span id="statusText">Connecting...</span>
             </div>
@@ -37,39 +41,62 @@
     <!-- Control Panel -->
     <div class="gr-control-panel" id="controlPanel">
         <div class="gr-btn-group">
-            <button class="new-chat-btn" id="newChatBtn" aria-label="New Chat" title="New Chat">+ Chat</button>
-            <button class="stop-btn" id="stopBtn" aria-label="STOP">■ STOP</button>
-            <button class="history-btn" id="historyBtn" aria-label="Chat History" title="Past Conversations">📚
-                History</button>
+            <button class="new-chat-btn" id="newChatBtn" aria-label="New Chat" title="Start New Conversation">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5">
+                    <path d="M12 5v14M5 12h14" />
+                </svg>
+                <span>+ Chat</span>
+            </button>
+            <button class="stop-btn" id="stopBtn" aria-label="STOP" title="Stop agent execution">
+                <span>■ STOP</span>
+            </button>
+            <button class="history-btn" id="historyBtn" aria-label="Chat History" title="Browse Past Conversations">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M12 8v4l3 3m6-3a9 9 0 1 1-18 0 9 9 0 0 1 18 0z" />
+                </svg>
+                <span>History</span>
+                <span class="history-count-badge" id="historyCountBadge" style="display: none;">0</span>
+            </button>
         </div>
-        <button class="refresh-btn" id="refreshBtn" aria-label="Restart IDE">↻ Restart IDE</button>
+        <button class="refresh-btn" id="refreshBtn" aria-label="Restart IDE" title="Restart / Reconnect IDE">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M23 4v6h-6M1 20v-6h6" />
+                <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+            </svg>
+            <span>Restart</span>
+        </button>
     </div>
 
-    <!-- Settings Bar -->
-    <div class="settings-bar">
-        <div class="setting-chip" id="modeBtn">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />
-            </svg>
-            <span id="modeText">Fast</span>
+    <!-- Active Chat & Settings Sub-bar -->
+    <div class="active-chat-strip" id="activeChatStrip">
+        <div class="active-chat-pill" onclick="showChatHistory()" title="Click to switch conversation">
+            <span class="chat-pill-icon">💬</span>
+            <span class="chat-pill-title" id="activeChatTitle">Current Conversation</span>
+            <span class="chat-pill-arrow">▾</span>
         </div>
-        <div class="setting-chip" id="modelBtn">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <circle cx="12" cy="12" r="10" />
-                <path d="M12 16v-4" />
-                <path d="M12 8h.01" />
-            </svg>
-            <span id="modelText">Select Model</span>
-        </div>
-        <div class="setting-chip" id="syncStats" style="cursor: default; border: none; background: transparent;">
-            <span id="statsText" style="font-size: 10px; opacity: 0.6;">Syncing...</span>
+        <div class="settings-chips-group">
+            <div class="setting-chip" id="modeBtn" title="Toggle Fast / Planning Mode">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />
+                </svg>
+                <span id="modeText">Fast</span>
+            </div>
+            <div class="setting-chip" id="modelBtn" title="Switch Model">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <circle cx="12" cy="12" r="10" />
+                    <path d="M12 16v-4M12 8h.01" />
+                </svg>
+                <span id="modelText">Gemini 3.7 Flash</span>
+            </div>
+            <div class="setting-chip sync-stats" id="syncStats" style="cursor: default; border: none; background: transparent;">
+                <span id="statsText" style="font-size: 10px; opacity: 0.6;">Syncing...</span>
+            </div>
         </div>
     </div>
 
     <!-- Lisan al-Arab Scrolling Text -->
     <div class="lisan-banners" id="lisanBanners">
-        <div id="lisan-marquee" class="lisan-marquee-container">
-        </div>
+        <div id="lisan-marquee" class="lisan-marquee-container"></div>
     </div>
 
     <!-- SSL Banner (shown when running HTTP) -->
@@ -84,23 +111,24 @@
         <div class="chat-content" id="chatContent">
             <div class="loading-state">
                 <div class="loading-spinner"></div>
-                <p>Waiting for snapshot...</p>
+                <p>Connecting to Antigravity IDE...</p>
             </div>
         </div>
     </div>
 
     <!-- Scroll to Bottom FAB -->
     <button class="fab" id="scrollToBottom" aria-label="Scroll to bottom">
-        <svg viewBox="0 0 24 24" fill="none">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
             <path d="M12 5v14M19 12l-7 7-7-7" stroke-linecap="round" stroke-linejoin="round" />
         </svg>
     </button>
 
     <!-- Quick Actions -->
-    <div class="quick-actions">
+    <div class="quick-actions" id="quickActions">
         <div class="action-chip" onclick="quickAction('Continue')">Continue</div>
         <div class="action-chip" onclick="quickAction('Please fix the bugs in this file.')">Fix Bugs</div>
         <div class="action-chip" onclick="quickAction('Please create documentation for this.')">Create Docs</div>
+        <div class="action-chip" onclick="quickAction('Run tests and check output.')">Run Tests</div>
     </div>
 
     <!-- Input Section -->
@@ -119,7 +147,7 @@
                     <polyline points="21 15 16 10 5 21" />
                 </svg>
             </button>
-            <textarea id="messageInput" placeholder="Message..." rows="1"></textarea>
+            <textarea id="messageInput" placeholder="Message agent..." rows="1"></textarea>
             <button class="send-btn" id="sendBtn" aria-label="Send">
                 <svg viewBox="0 0 24 24">
                     <path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"
@@ -129,50 +157,170 @@
         </div>
     </div>
 
-    <!-- Modals -->
+    <!-- Generic Modal Overlay (Models, Modes) -->
     <div class="modal-overlay" id="modalOverlay">
         <div class="modal-panel" id="modalPanel">
             <div class="modal-title" id="modalTitle">Select Option</div>
             <div id="modalList"></div>
             <div style="margin-top:20px; text-align:center;">
                 <button onclick="closeModal()"
-                    style="background:transparent; border:none; color:var(--text-muted); padding:10px;">Cancel</button>
+                    style="background:transparent; border:none; color:var(--text-muted); padding:10px; font-size:14px; cursor:pointer;">Cancel</button>
             </div>
         </div>
     </div>
 
-    <!-- History Layer (Full Screen) -->
-    <div class="history-layer" id="historyLayer">
-        <div class="history-header">
-            <button class="icon-btn" onclick="hideChatHistory()" aria-label="Back">
-                <svg viewBox="0 0 24 24" width="24" height="24">
-                    <path d="M19 12H5M12 19l-7-7 7-7" stroke="currentColor" stroke-width="2" stroke-linecap="round"
-                        stroke-linejoin="round" />
-                </svg>
-            </button>
-            <h2>Conversations</h2>
-            <div style="width: 24px;"></div> <!-- Spacer -->
-        </div>
-        <div class="history-content" id="historyList">
-            <!-- Items injected here -->
+    <!-- Restart / Reconnect Modal -->
+    <div class="modal-overlay" id="restartModalOverlay">
+        <div class="modal-panel" id="restartModalPanel" style="max-width: 440px;">
+            <div class="modal-title" style="display: flex; align-items: center; gap: 8px;">
+                <span>⚡</span>
+                <span>IDE Session Control</span>
+            </div>
+            <p style="font-size: 13px; color: var(--text-muted); line-height: 1.5; margin-bottom: 16px;">
+                Manage the desktop Antigravity IDE session and DevTools CDP bridge.
+            </p>
+            <div class="session-actions-list">
+                <button class="session-action-card primary" onclick="confirmRestartIDE()">
+                    <div class="session-action-icon">↻</div>
+                    <div class="session-action-info">
+                        <div class="session-action-title">Restart Antigravity IDE</div>
+                        <div class="session-action-desc">Kills and restarts desktop IDE with remote port 9222</div>
+                    </div>
+                </button>
+                <button class="session-action-card secondary" onclick="executeQuickReconnect()">
+                    <div class="session-action-icon">⚡</div>
+                    <div class="session-action-info">
+                        <div class="session-action-title">Quick CDP Reconnect</div>
+                        <div class="session-action-desc">Reconnects socket to running IDE without restarting</div>
+                    </div>
+                </button>
+            </div>
+            <div style="margin-top: 18px; text-align: center;">
+                <button onclick="closeRestartModal()"
+                    style="background: transparent; border: none; color: var(--text-muted); padding: 8px 16px; font-size: 13px; cursor: pointer;">
+                    Cancel
+                </button>
+            </div>
         </div>
     </div>
 
+    <!-- Restart Live Progress Screen -->
+    <div class="restart-overlay" id="restartProgressOverlay" style="display: none;">
+        <div class="restart-dialog">
+            <div class="restart-spinner"></div>
+            <h3 id="restartProgressTitle">Restarting IDE...</h3>
+            <p id="restartProgressDesc" style="font-size: 13px; color: var(--text-muted); margin: 8px 0 16px 0;">
+                Terminating desktop instance and relaunching with DevTools port 9222.
+            </p>
+            <div class="restart-countdown" id="restartCountdownVal">⏳ 12s</div>
+            <div class="restart-steps" id="restartStepsList">
+                <div class="restart-step-item active" id="stepKill">1. Terminating IDE process</div>
+                <div class="restart-step-item" id="stepLaunch">2. Launching Antigravity IDE</div>
+                <div class="restart-step-item" id="stepDiscover">3. Discovering DevTools port 9222</div>
+                <div class="restart-step-item" id="stepConnect">4. Re-establishing agent bridge</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- History Drawer (Full Screen / Slide-in) -->
+    <div class="history-layer" id="historyLayer">
+        <div class="history-header">
+            <div class="history-header-left">
+                <button class="icon-btn" onclick="hideChatHistory()" aria-label="Back" title="Close history">
+                    <svg viewBox="0 0 24 24" width="22" height="22">
+                        <path d="M19 12H5M12 19l-7-7 7-7" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                            stroke-linejoin="round" />
+                    </svg>
+                </button>
+                <div class="history-title-wrap">
+                    <h2>Conversations</h2>
+                    <span class="history-count-tag" id="drawerCountTag">0</span>
+                </div>
+            </div>
+            <div class="history-header-actions">
+                <button class="history-hdr-btn" onclick="startNewChatFromHistory()" title="Start New Conversation">
+                    <span>＋ New Chat</span>
+                </button>
+                <button class="icon-btn" onclick="refreshChatHistory(true)" title="Refresh list" id="historyRefreshBtn">
+                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M23 4v6h-6M1 20v-6h6" />
+                        <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+                    </svg>
+                </button>
+            </div>
+        </div>
+
+        <!-- History Search Bar -->
+        <div class="history-search-bar">
+            <div class="history-search-wrapper">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                    <circle cx="11" cy="11" r="8" />
+                    <path d="M21 21l-4.35-4.35" />
+                </svg>
+                <input type="text" id="historySearchInput" placeholder="Filter conversations..." autocomplete="off" />
+                <button id="clearSearchBtn" class="clear-search-btn" style="display: none;" onclick="clearHistorySearch()">×</button>
+            </div>
+        </div>
+
+        <div class="history-content" id="historyList">
+            <!-- Items injected here dynamically -->
+        </div>
+    </div>
+
+    <!-- Embedded Scripts for Stats & Lisan al-Arab -->
     <script>
-        // ◆ GRAVITYREMOTE Header Functions
-        let grHeaderCollapsed = false;
-        function toggleHeaderCollapse() {
-            grHeaderCollapsed = !grHeaderCollapsed;
-            const els = ['controlPanel', 'lisanBanners', 'settingsBar', 'quickActions'];
-            els.forEach(id => {
+        let grCompactLisan = localStorage.getItem("grCompactLisan") === "1";
+
+        function applyHeaderCollapseState() {
+            const hideEls = ["controlPanel", "activeChatStrip", "quickActions"];
+            hideEls.forEach(id => {
                 const el = document.getElementById(id);
-                if (el) el.classList.toggle('gr-collapsed', grHeaderCollapsed);
+                if (el) el.classList.toggle("gr-collapsed", grCompactLisan);
             });
-            // Also toggle the settings bar by class if no ID
-            document.querySelectorAll('.settings-bar, .quick-actions').forEach(el => {
-                el.classList.toggle('gr-collapsed', grHeaderCollapsed);
-            });
+            // Ensure Lisan al-Arab moving banner is ALWAYS visible directly under the top header in compact mode
+            const lisan = document.getElementById("lisanBanners");
+            if (lisan) lisan.classList.remove("gr-collapsed");
         }
+
+        function toggleHeaderCollapse() {
+            grCompactLisan = !grCompactLisan;
+            localStorage.setItem("grCompactLisan", grCompactLisan ? "1" : "0");
+            applyHeaderCollapseState();
+            if (typeof showToast === "function") {
+                showToast(grCompactLisan ? "🌿 Compact View (Lisan Banner Only)" : "📱 Full Controls View", 1500);
+            }
+        }
+
+        // Apply on initial load
+        if (grCompactLisan) {
+            document.addEventListener("DOMContentLoaded", applyHeaderCollapseState);
+        }
+
+        // Two-time tap (double tap / double click) on the top banner
+        document.addEventListener("DOMContentLoaded", () => {
+            const header = document.querySelector(".gr-header");
+            if (header) {
+                let lastTapTime = 0;
+                // Double-click for desktop
+                header.addEventListener("dblclick", (e) => {
+                    if (e.target.closest(".status-badge")) return;
+                    toggleHeaderCollapse();
+                });
+                // Double-tap for mobile touch
+                header.addEventListener("touchend", (e) => {
+                    if (e.target.closest(".status-badge")) return;
+                    const now = Date.now();
+                    const diff = now - lastTapTime;
+                    if (diff > 0 && diff < 380) {
+                        e.preventDefault();
+                        toggleHeaderCollapse();
+                        lastTapTime = 0;
+                    } else {
+                        lastTapTime = now;
+                    }
+                });
+            }
+        });
 
         // System stats polling (real CPU/RAM from server)
         async function pollSystemStats() {
@@ -181,15 +329,19 @@
                 if (res.ok) {
                     const data = await res.json();
                     if (data.cpu !== undefined) {
-                        document.getElementById('cpuStat').textContent = data.cpu + '%';
+                        const el = document.getElementById('cpuStat');
+                        if (el) el.textContent = data.cpu + '%';
                     }
                     if (data.ram) {
-                        document.getElementById('ramStat').textContent = data.ram.usedGB + '/' + data.ram.totalGB + 'G';
+                        const el = document.getElementById('ramStat');
+                        if (el) el.textContent = data.ram.usedGB + '/' + data.ram.totalGB + 'G';
                     }
                 }
             } catch (e) {
-                document.getElementById('cpuStat').textContent = 'ERR';
-                document.getElementById('ramStat').textContent = 'ERR';
+                const cpu = document.getElementById('cpuStat');
+                const ram = document.getElementById('ramStat');
+                if (cpu) cpu.textContent = 'ERR';
+                if (ram) ram.textContent = 'ERR';
             }
         }
         pollSystemStats();
@@ -198,7 +350,6 @@
         // ==========================================
         // لِسَان العَرَب - Lisan al-Arab Streaming
         // ==========================================
-
         let lisanSentences = [
             "بِسْمِ اللَّهِ الرَّحْمَٰنِ الرَّحِيمِ",
             "اقْرَأْ بِاسْمِ رَبِّكَ الَّذِي خَلَقَ",
@@ -208,7 +359,6 @@
             "عَلَّمَ الْإِنسَانَ مَا لَمْ يَعْلَمْ"
         ];
 
-        // Fetch Lisan data from server (lisanclean.json roots)
         async function fetchLisanData() {
             try {
                 const response = await fetch('/api/lisan');
@@ -217,12 +367,9 @@
                     if (data && data.length > 0) {
                         lisanSentences = data;
                         currentLisanIndex = 0;
-                        console.log('Lisan data loaded:', data.length, 'sentences');
                     }
                 }
-            } catch (e) {
-                console.error('Failed to fetch Lisan data:', e);
-            }
+            } catch (e) { }
         }
         fetchLisanData();
         setInterval(fetchLisanData, 60000);
@@ -323,7 +470,7 @@
         }
 
         function prependNextSentence() {
-            if (!lisanSentences.length) return;
+            if (!lisanSentences.length || !marqueeContainer) return;
             const sentence = lisanSentences[currentLisanIndex];
             const fragment = createSentenceFragment(sentence);
             const oldWidth = marqueeContainer.getBoundingClientRect().width;
@@ -353,7 +500,7 @@
         }
 
         function initLisanStream() {
-            if (isLisanInitialized) return;
+            if (isLisanInitialized || !marqueeContainer) return;
             isLisanInitialized = true;
             while (marqueeContainer.getBoundingClientRect().width < window.innerWidth * 2) {
                 prependNextSentence();
@@ -365,7 +512,7 @@
 
         if (lisanSentences.length > 0) { initLisanStream(); }
     </script>
-    <script src="js/app.js?v=2.0"></script>
+    <script src="js/app.js?v=2.4"></script>
 </body>
 
 </html>

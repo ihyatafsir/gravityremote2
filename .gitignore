@@ -5,3 +5,12 @@ mcp.log
 .DS_Store
 brain/
 state.json
+
+__pycache__/
+ide_dump_*.html
+*.apk
+*.epub
+*.mp4
+*.wav
+*.mp3
+*.bak

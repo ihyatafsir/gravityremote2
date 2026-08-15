@@ -17,14 +17,15 @@ import { execSync, spawn } from 'child_process';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-const PORTS = [9022, 9222, 9000, 9001, 9002, 9003];
+const PORTS = [9222, 9022, 9000, 9001, 9002, 9003];
 const HEALTH_CHECK_INTERVAL = 30000; // 30s health check (reduced CDP load)
-const FALLBACK_SNAPSHOT_INTERVAL = 120000; // 120s — only if no push received
-const PUSH_FETCH_THROTTLE = 2000; // Min 2s between server-side snapshot fetches (snappier updates)
+const FALLBACK_SNAPSHOT_INTERVAL = 30000; // 30s fallback check
+const PUSH_FETCH_THROTTLE = 2000; // 2s throttle between snapshot broadcasts
 const SERVER_PORT = process.env.PORT || 3000;
 const APP_PASSWORD = process.env.APP_PASSWORD || 'antigravity';
 const AUTH_COOKIE_NAME = 'ag_auth_token';
 let AUTH_TOKEN = 'ag_default_token';
+let globalWss = null;
 
 // Shared CDP connection
 let cdpConnection = null;
@@ -77,7 +78,7 @@ function killPortProcess(port) {
         } else {
             // Linux/macOS: Use lsof and kill
             const result = execSync(`lsof -ti:${port}`, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] });
-            const pids = result.trim().split('\n').filter(p => p);
+            const pids = result.trim().split('\n').filter(p => p && p.trim() !== String(process.pid));
             for (const pid of pids) {
                 try {
                     execSync(`kill -9 ${pid}`, { stdio: 'pipe' });
@@ -120,46 +121,62 @@ function getLocalIP() {
     return candidates.length > 0 ? candidates[0].address : 'localhost';
 }
 
-// Helper: HTTP GET JSON
-function getJson(url) {
+// Helper: HTTP GET JSON with timeout
+function getJson(url, timeoutMs = 2500) {
     return new Promise((resolve, reject) => {
-        http.get(url, (res) => {
+        const req = http.get(url, (res) => {
             let data = '';
             res.on('data', chunk => data += chunk);
             res.on('end', () => {
                 try { resolve(JSON.parse(data)); } catch (e) { reject(e); }
             });
-        }).on('error', reject);
+        });
+        req.on('error', reject);
+        req.setTimeout(timeoutMs, () => {
+            req.destroy(new Error(`Timeout after ${timeoutMs}ms connecting to ${url}`));
+        });
     });
 }
 
-// Find Antigravity CDP endpoint
-// Find Antigravity CDP endpoint
+// Find Antigravity CDP endpoint (Fast Parallel Discovery)
 async function discoverCDP() {
-    const errors = [];
-    for (const port of PORTS) {
+    const checkPort = async (port) => {
         try {
-            const list = await getJson(`http://127.0.0.1:${port}/json/list`);
+            const list = await getJson(`http://127.0.0.1:${port}/json/list`, 1000);
+            if (!Array.isArray(list)) return null;
 
             // Priority 1: Standard Workbench (The main window)
             const workbench = list.find(t => t.url?.includes('workbench.html') || (t.title && t.title.includes('workbench')));
             if (workbench && workbench.webSocketDebuggerUrl) {
-                console.log('Found Workbench target:', workbench.title);
-                return { port, url: workbench.webSocketDebuggerUrl };
+                return { priority: 1, port, url: workbench.webSocketDebuggerUrl, title: workbench.title };
             }
 
             // Priority 2: Jetski/Launchpad (Fallback)
             const jetski = list.find(t => t.url?.includes('jetski') || t.title === 'Launchpad');
             if (jetski && jetski.webSocketDebuggerUrl) {
-                console.log('Found Jetski/Launchpad target:', jetski.title);
-                return { port, url: jetski.webSocketDebuggerUrl };
+                return { priority: 2, port, url: jetski.webSocketDebuggerUrl, title: jetski.title };
             }
+
+            // Priority 3: Any page
+            const page = list.find(t => t.type === 'page' && t.webSocketDebuggerUrl);
+            if (page) {
+                return { priority: 3, port, url: page.webSocketDebuggerUrl, title: page.title };
+            }
+            return null;
         } catch (e) {
-            errors.push(`${port}: ${e.message}`);
+            return null;
         }
+    };
+
+    const results = await Promise.all(PORTS.map(checkPort));
+    const valid = results.filter(Boolean).sort((a, b) => a.priority - b.priority);
+
+    if (valid.length > 0) {
+        console.log(`Found target on port ${valid[0].port}:`, valid[0].title);
+        return { port: valid[0].port, url: valid[0].url };
     }
-    const errorSummary = errors.length ? `Errors: ${errors.join(', ')}` : 'No ports responding';
-    throw new Error(`CDP not found. ${errorSummary}`);
+
+    throw new Error('CDP endpoint not found on any monitored port');
 }
 
 // Connect to CDP
@@ -316,6 +333,11 @@ async function ensureCDP() {
             if (cdpConnection) {
                 console.log('✅ ensureCDP: reconnected!');
                 reconnectAttempts = 0;
+                observerInjected = false;
+                if (globalWss) {
+                    wirePushHandler(globalWss);
+                }
+                injectObserver(cdpConnection).catch(() => {});
                 return true;
             }
         } catch (e) {
@@ -430,7 +452,12 @@ async function captureSnapshot(cdp) {
     } else {
         // Scan all contexts to find the right one (lightweight check)
         cachedSnapshotCtxId = null;
-        for (const ctx of cdp.contexts) {
+        const sortedContexts = [...cdp.contexts].sort((a, b) => {
+            const aDef = (a.auxData?.isDefault || a.id === 1) ? 1 : 0;
+            const bDef = (b.auxData?.isDefault || b.id === 1) ? 1 : 0;
+            return bDef - aDef;
+        });
+        for (const ctx of sortedContexts) {
             try {
                 const probe = await cdp.call("Runtime.evaluate", {
                     expression: LIGHT_CHECK_SCRIPT,
@@ -560,6 +587,13 @@ async function captureSnapshot(cdp) {
             });
         } catch (globalErr) { }
         
+        clone.querySelectorAll('[style*="container-type"]').forEach(el => {
+            el.style.containerType = 'normal';
+        });
+        clone.querySelectorAll('.overflow-hidden, .overflow-y-hidden, .overflow-y-auto').forEach(el => {
+            el.style.overflow = 'visible';
+            el.style.height = 'auto';
+        });
         const html = clone.outerHTML;
         
         return {
@@ -1227,30 +1261,70 @@ async function setModel(cdp, modelName) {
     return bestResult || { error: 'Context failed' };
 }
 
-// Start New Chat - Use Agent Manager Shortcut Ctrl+L
+// Start New Chat - Click New Conversation button in cascade context or fallback to shortcuts
 async function startNewChat(cdp) {
+    const CLICK_EXP = `(async () => {
+        try {
+            // Priority 1: Exact new-conversation tooltip anchor
+            const newBtn = document.querySelector('[data-tooltip-id="new-conversation-tooltip"]') ||
+                           document.querySelector('a[data-tooltip-id*="new-conversation"]') ||
+                           document.querySelector('[data-past-conversations-toggle="true"]')?.parentElement?.querySelector('[data-tooltip-id*="new"]');
+            if (newBtn) {
+                newBtn.click();
+                return { success: true, method: 'dom_new_conversation_tooltip', tag: newBtn.tagName };
+            }
+            // Priority 2: Generic plus buttons in chat header
+            const allPlus = Array.from(document.querySelectorAll('a, button, [role="button"]')).filter(el => {
+                if (el.offsetParent === null) return false;
+                const txt = el.innerText?.trim() || '';
+                const aria = el.getAttribute('aria-label') || el.getAttribute('title') || '';
+                if (/new conversation|new chat|start new/i.test(aria) || /new conversation|new chat/i.test(txt)) return true;
+                const path = el.querySelector('path');
+                if (path && (path.getAttribute('d') || '').includes('450-450H220')) return true;
+                return false;
+            });
+            if (allPlus.length > 0) {
+                allPlus[0].click();
+                return { success: true, method: 'dom_plus_button', tag: allPlus[0].tagName };
+            }
+            return { clicked: false };
+        } catch(e) {
+            return { clicked: false, error: e.toString() };
+        }
+    })()`;
+
+    for (const ctx of cdp.contexts) {
+        try {
+            const res = await cdp.call("Runtime.evaluate", {
+                expression: CLICK_EXP,
+                returnByValue: true,
+                awaitPromise: true,
+                contextId: ctx.id
+            });
+            if (res.result?.value?.success) {
+                console.log(`[NEW-CHAT] ✅ Clicked New Chat in context ${ctx.id}:`, res.result.value.method);
+                cachedSnapshotCtxId = null;
+                cachedCascadeCtxId = null;
+                observerInjected = false;
+                return res.result.value;
+            }
+        } catch (e) { }
+    }
+
+    // Fallback: Send Ctrl+L shortcut
     try {
-        console.log('[NEW-CHAT] ⌨️ Sending Ctrl+L to trigger new Agent Chat');
-        // Press Ctrl
+        console.log('[NEW-CHAT] ⌨️ Fallback: Sending Ctrl+L');
         await cdp.call("Input.dispatchKeyEvent", {
-            type: "keyDown", key: "Control", code: "ControlLeft",
-            modifiers: 2, windowsVirtualKeyCode: 17, nativeVirtualKeyCode: 17
+            type: "keyDown", key: "l", code: "KeyL",
+            modifiers: 2, windowsVirtualKeyCode: 76, nativeVirtualKeyCode: 76
         });
-        // Press E
         await cdp.call("Input.dispatchKeyEvent", {
-            type: "keyDown", key: "e", code: "KeyE",
-            modifiers: 2, windowsVirtualKeyCode: 69, nativeVirtualKeyCode: 69
+            type: "keyUp", key: "l", code: "KeyL",
+            modifiers: 2, windowsVirtualKeyCode: 76, nativeVirtualKeyCode: 76
         });
-        // Release E
-        await cdp.call("Input.dispatchKeyEvent", {
-            type: "keyUp", key: "e", code: "KeyE",
-            modifiers: 2, windowsVirtualKeyCode: 69, nativeVirtualKeyCode: 69
-        });
-        // Release Ctrl
-        await cdp.call("Input.dispatchKeyEvent", {
-            type: "keyUp", key: "Control", code: "ControlLeft",
-            modifiers: 0, windowsVirtualKeyCode: 17, nativeVirtualKeyCode: 17
-        });
+        cachedSnapshotCtxId = null;
+        cachedCascadeCtxId = null;
+        observerInjected = false;
         return { success: true, method: 'cdp_shortcut_ctrl_l' };
     } catch (e) {
         console.error('[NEW-CHAT] ❌ Shortcut failed:', e.message);
@@ -1431,105 +1505,59 @@ async function selectChat(cdp, chatTitle) {
     const safeChatTitle = JSON.stringify(chatTitle);
 
     const EXP = `(async () => {
-    try {
-        const targetTitle = ${safeChatTitle};
+        try {
+            const targetTitle = ${safeChatTitle};
 
-        // First, we need to open the history panel
-        // Find the history button at the top (next to + button)
-        const allButtons = Array.from(document.querySelectorAll('button, [role="button"]'));
-
-        let historyBtn = null;
-
-        // Find by icon type
-        for (const btn of allButtons) {
-            if (btn.offsetParent === null) continue;
-            const hasHistoryIcon = btn.querySelector('svg.lucide-clock') ||
-                btn.querySelector('svg.lucide-history') ||
-                btn.querySelector('svg.lucide-folder') ||
-                btn.querySelector('svg.lucide-clock-rotate-left');
-            if (hasHistoryIcon) {
-                historyBtn = btn;
-                break;
-            }
-        }
-
-        // Fallback: Find by position (second button at top)
-        if (!historyBtn) {
-            const topButtons = allButtons.filter(btn => {
-                if (btn.offsetParent === null) return false;
-                const rect = btn.getBoundingClientRect();
-                return rect.top < 100 && rect.top > 0;
-            }).sort((a, b) => a.getBoundingClientRect().left - b.getBoundingClientRect().left);
-
-            if (topButtons.length >= 2) {
-                historyBtn = topButtons[1];
-            }
-        }
-
-        if (historyBtn) {
-            historyBtn.click();
-            await new Promise(r => setTimeout(r, 600));
-        }
-
-        // Now find the chat by title in the opened panel
-        await new Promise(r => setTimeout(r, 200));
-
-        const allElements = Array.from(document.querySelectorAll('*'));
-
-        // Find elements matching the title
-        const candidates = allElements.filter(el => {
-            if (el.offsetParent === null) return false;
-            const text = el.innerText?.trim();
-            return text && text.startsWith(targetTitle.substring(0, Math.min(30, targetTitle.length)));
-        });
-
-        // Find the most specific (deepest) visible element with the title
-        let target = null;
-        let maxDepth = -1;
-
-        for (const el of candidates) {
-            // Skip if it has too many children (likely a container)
-            if (el.children.length > 5) continue;
-
-            let depth = 0;
-            let parent = el;
-            while (parent) {
-                depth++;
-                parent = parent.parentElement;
+            // 1. Open history panel if not already open
+            let historyBtn = document.querySelector('[data-tooltip-id="history-tooltip"]') ||
+                             document.querySelector('[data-past-conversations-toggle="true"]') ||
+                             document.querySelector('[data-tooltip-id*="history"]');
+            
+            if (historyBtn) {
+                historyBtn.click();
+                await new Promise(r => setTimeout(r, 600));
             }
 
-            if (depth > maxDepth) {
-                maxDepth = depth;
-                target = el;
-            }
-        }
+            // 2. Find matching element
+            const allElements = Array.from(document.querySelectorAll('*'));
+            const cleanTarget = targetTitle.trim().toLowerCase();
 
-        if (target) {
-            // Find clickable parent if needed
+            const candidates = allElements.filter(el => {
+                if (el.offsetParent === null) return false;
+                const text = (el.innerText || el.textContent || '').trim().toLowerCase();
+                if (!text) return false;
+                return text === cleanTarget ||
+                       text.startsWith(cleanTarget.slice(0, 25)) ||
+                       cleanTarget.startsWith(text.slice(0, 25));
+            });
+
+            if (candidates.length === 0) {
+                return { error: 'Chat title not found in history: ' + targetTitle };
+            }
+
+            // Target the most specific element (deepest in tree)
+            let target = candidates[candidates.length - 1];
             let clickable = target;
             for (let i = 0; i < 5; i++) {
                 if (!clickable) break;
-                const style = window.getComputedStyle(clickable);
-                if (style.cursor === 'pointer' || clickable.tagName === 'BUTTON') {
+                if (clickable.tagName === 'BUTTON' || clickable.tagName === 'A' ||
+                    clickable.getAttribute('role') === 'button' ||
+                    clickable.getAttribute('role') === 'option' ||
+                    clickable.classList.contains('monaco-list-row') ||
+                    (clickable.className && typeof clickable.className === 'string' && clickable.className.includes('cursor-pointer'))) {
                     break;
                 }
                 clickable = clickable.parentElement;
             }
 
-            if (clickable) {
-                clickable.click();
-                return { success: true, method: 'clickable_parent' };
-            }
+            (clickable || target).click();
+            await new Promise(r => setTimeout(r, 400));
 
-            target.click();
-            return { success: true, method: 'direct_click' };
+            return { success: true, method: 'clicked_item', title: targetTitle };
+        } catch (e) {
+            return { error: e.toString() };
         }
-
-        return { error: 'Chat not found: ' + targetTitle };
-    } catch (e) {
-        return { error: e.toString() };
-    }
-})()`;
+    })()`;
 
     for (const ctx of cdp.contexts) {
         try {
@@ -1539,10 +1567,16 @@ async function selectChat(cdp, chatTitle) {
                 awaitPromise: true,
                 contextId: ctx.id
             });
-            if (res.result?.value) return res.result.value;
+            if (res.result?.value?.success) {
+                console.log(`[SELECT-CHAT] ✅ Selected "${chatTitle}" in context ${ctx.id}`);
+                cachedSnapshotCtxId = null;
+                cachedCascadeCtxId = null;
+                observerInjected = false;
+                return res.result.value;
+            }
         } catch (e) { }
     }
-    return { error: 'Context failed' };
+    return { error: 'Failed to select chat in any context' };
 }
 
 // Check if a chat is currently open (has cascade element)
@@ -1682,29 +1716,27 @@ async function initCDP() {
 
 // Inject MutationObserver into the IDE page — pushes DOM changes to server via binding
 async function injectObserver(cdp) {
-    if (observerInjected) return true;
-    if (!cdp || cdp.contexts.length === 0) return false;
+    if (!cdp || !cdp.contexts || cdp.contexts.length === 0) return false;
 
     const INJECT_SCRIPT = `(function() {
-        if (window.__agObserverActive) return 'already_active';
+        if (window.__agObserverDisconnect) {
+            try { window.__agObserverDisconnect(); } catch (e) {}
+        }
 
         const cascade = document.getElementById('conversation') || document.getElementById('chat') || document.getElementById('cascade');
         if (!cascade) return 'no_container';
 
-        // Debounce timer
         let debounceTimer = null;
-        const DEBOUNCE_MS = 500;
+        const DEBOUNCE_MS = 300;
 
-        // LIGHTWEIGHT: Only sends a tiny signal — no DOM cloning on the IDE thread
         function pushSignal() {
             try {
-                window.agPushSnapshot(JSON.stringify({ changed: true, t: Date.now() }));
-            } catch (err) {
-                // Silently fail — don't crash the IDE
-            }
+                if (typeof window.agPushSnapshot === 'function') {
+                    window.agPushSnapshot(JSON.stringify({ changed: true, t: Date.now() }));
+                }
+            } catch (err) {}
         }
 
-        // MutationObserver — fires on any DOM change in the chat
         const observer = new MutationObserver(() => {
             clearTimeout(debounceTimer);
             debounceTimer = setTimeout(pushSignal, DEBOUNCE_MS);
@@ -1717,37 +1749,39 @@ async function injectObserver(cdp) {
         });
 
         window.__agObserverActive = true;
-        window.__agObserverDisconnect = () => { observer.disconnect(); window.__agObserverActive = false; };
+        window.__agObserverDisconnect = () => {
+            try { observer.disconnect(); } catch (e) {}
+            window.__agObserverActive = false;
+        };
 
-        // Push an initial signal immediately
-        setTimeout(pushSignal, 100);
-
+        setTimeout(pushSignal, 50);
         return 'injected';
     })()`;
 
-    // Find the right context to inject into
-    let targetCtxId = cachedSnapshotCtxId;
+    const sortedContexts = [...cdp.contexts].sort((a, b) => {
+        const aDef = (a.auxData?.isDefault || a.id === 1) ? 1 : 0;
+        const bDef = (b.auxData?.isDefault || b.id === 1) ? 1 : 0;
+        return bDef - aDef;
+    });
 
-    if (!targetCtxId || !cdp.contexts.some(c => c.id === targetCtxId)) {
-        // Scan for the correct context using a lightweight probe
-        for (const ctx of cdp.contexts) {
-            try {
-                const probe = await cdp.call("Runtime.evaluate", {
-                    expression: `!!(document.getElementById('conversation') || document.getElementById('chat') || document.getElementById('cascade'))`,
-                    returnByValue: true,
-                    contextId: ctx.id
-                });
-                if (probe.result?.value === true) {
-                    targetCtxId = ctx.id;
-                    cachedSnapshotCtxId = ctx.id;
-                    break;
-                }
-            } catch (e) { }
-        }
+    let targetCtxId = null;
+    for (const ctx of sortedContexts) {
+        try {
+            const probe = await cdp.call("Runtime.evaluate", {
+                expression: "!!(document.getElementById('conversation') || document.getElementById('chat') || document.getElementById('cascade'))",
+                returnByValue: true,
+                contextId: ctx.id
+            });
+            if (probe.result?.value === true) {
+                targetCtxId = ctx.id;
+                cachedSnapshotCtxId = ctx.id;
+                break;
+            }
+        } catch (e) { }
     }
 
     if (!targetCtxId) {
-        console.log('⏳ No chat container found for observer injection (IDE may still be loading)');
+        console.log('⏳ No chat container found for observer injection');
         return false;
     }
 
@@ -1761,10 +1795,7 @@ async function injectObserver(cdp) {
         const result = res.result?.value;
         if (result === 'injected') {
             observerInjected = true;
-            console.log('👁️  MutationObserver injected — push mode active');
-            return true;
-        } else if (result === 'already_active') {
-            observerInjected = true;
+            console.log(`👁️  MutationObserver injected in context ${targetCtxId} — push mode active`);
             return true;
         } else {
             console.log(`⏳ Observer injection returned: ${result}`);
@@ -1790,66 +1821,62 @@ function broadcastSnapshotUpdate(wss) {
 
 // Background health-check loop (replaces heavy polling)
 // Only handles: CDP reconnection, observer injection, rare fallback snapshots
+// Wire up push handler on CDP connection
+function wirePushHandler(wss) {
+    if (!cdpConnection) return;
+    cdpConnection.onPush = (payload) => {
+        lastPushTime = Date.now();
+        if (!payload.changed) return;
+
+        const now = Date.now();
+        const elapsed = now - lastPushFetchTime;
+
+        if (elapsed >= PUSH_FETCH_THROTTLE) {
+            fetchAndBroadcastSnapshot(wss || globalWss);
+        } else if (!pendingPushFetch) {
+            pendingPushFetch = true;
+            const delay = PUSH_FETCH_THROTTLE - elapsed;
+            setTimeout(() => {
+                pendingPushFetch = false;
+                fetchAndBroadcastSnapshot(wss || globalWss);
+            }, delay);
+        }
+    };
+}
+
+// Server-side snapshot fetch (runs via CDP, not in-page)
+async function fetchAndBroadcastSnapshot(wss) {
+    const targetWss = wss || globalWss;
+    if (!cdpConnection || !targetWss) return;
+    lastPushFetchTime = Date.now();
+    lastPushTime = Date.now();
+    try {
+        const snapshot = await Promise.race([
+            captureSnapshot(cdpConnection),
+            new Promise(resolve => setTimeout(() => resolve(null), 8000))
+        ]);
+        if (snapshot && snapshot !== '__unchanged__' && !snapshot.error) {
+            const hash = hashString(snapshot.html);
+            if (hash !== lastSnapshotHash) {
+                lastSnapshot = snapshot;
+                lastSnapshotHash = hash;
+                broadcastSnapshotUpdate(targetWss);
+                console.log(`📡 Snapshot update broadcast (hash: ${hash})`);
+            }
+        }
+    } catch (e) {
+        console.error('Snapshot broadcast error:', e.message);
+    }
+}
+
+// Background health-check loop
 async function startBackgroundLoop(wss) {
     let isConnecting = false;
 
-    // Wire up the push handler on the CDP connection
-    // Now receives lightweight "changed" signals and fetches snapshot server-side
-    function wirePushHandler() {
-        if (!cdpConnection) return;
-        cdpConnection.onPush = (payload) => {
-            lastPushTime = Date.now();
-
-            // payload is now just { changed: true, t: ... } — a lightweight signal
-            if (!payload.changed) return;
-
-            const now = Date.now();
-            const elapsed = now - lastPushFetchTime;
-
-            if (elapsed >= PUSH_FETCH_THROTTLE) {
-                // Enough time has passed — fetch immediately
-                fetchAndBroadcastSnapshot(wss);
-            } else if (!pendingPushFetch) {
-                // Schedule a fetch after the throttle window
-                pendingPushFetch = true;
-                const delay = PUSH_FETCH_THROTTLE - elapsed;
-                setTimeout(() => {
-                    pendingPushFetch = false;
-                    fetchAndBroadcastSnapshot(wss);
-                }, delay);
-            }
-            // else: a fetch is already scheduled, skip
-        };
-    }
-
-    // Server-side snapshot fetch (runs via CDP, not in-page)
-    async function fetchAndBroadcastSnapshot(wss) {
-        if (!cdpConnection) return;
-        lastPushFetchTime = Date.now();
-        try {
-            const snapshot = await Promise.race([
-                captureSnapshot(cdpConnection),
-                new Promise(resolve => setTimeout(() => resolve(null), 8000)) // 8s timeout (was 3s, but large DOM eval takes longer under heavy terminal load)
-            ]);
-            if (snapshot && snapshot !== '__unchanged__' && !snapshot.error) {
-                const hash = hashString(snapshot.html);
-                if (hash !== lastSnapshotHash) {
-                    lastSnapshot = snapshot;
-                    lastSnapshotHash = hash;
-                    broadcastSnapshotUpdate(wss);
-                    console.log(`📡 Push-triggered snapshot (hash: ${hash})`);
-                }
-            }
-        } catch (e) {
-            console.error('Push-triggered snapshot error:', e.message);
-        }
-    }
-
     // Initial wiring
-    wirePushHandler();
+    wirePushHandler(wss);
 
     const healthCheck = async () => {
-        // --- 1. CDP Connection Health ---
         if (!cdpConnection || (cdpConnection.ws && cdpConnection.ws.readyState !== WebSocket.OPEN)) {
             if (!isConnecting) {
                 console.log('🔍 Looking for Antigravity CDP connection...');
@@ -1866,17 +1893,16 @@ async function startBackgroundLoop(wss) {
                     console.log(`✅ CDP Connection established (after ${reconnectAttempts} attempts)`);
                     isConnecting = false;
                     reconnectAttempts = 0;
-                    wirePushHandler();
+                    wirePushHandler(wss);
+                    injectObserver(cdpConnection).catch(() => {});
                 }
-            } catch (err) { /* wait for next cycle */ }
-            // Exponential backoff: 3s -> 6s -> 12s -> 24s -> cap at 30s
+            } catch (err) { }
             reconnectAttempts++;
             const delay = Math.min(RECONNECT_BASE_MS * Math.pow(2, reconnectAttempts - 1), RECONNECT_MAX_MS);
             setTimeout(healthCheck, delay);
             return;
         }
 
-        // --- 2. Observer Injection ---
         if (!observerInjected) {
             try {
                 await injectObserver(cdpConnection);
@@ -1885,7 +1911,6 @@ async function startBackgroundLoop(wss) {
             }
         }
 
-        // --- 3. CSS Cache Refresh (infrequent, lightweight) ---
         const now = Date.now();
         if (!cachedCSS || (now - lastCSSRefresh) > CSS_CACHE_TTL) {
             try {
@@ -1899,41 +1924,20 @@ async function startBackgroundLoop(wss) {
                     if (cssRes.result?.value) {
                         cachedCSS = cssRes.result.value;
                         lastCSSRefresh = now;
-                        // Update existing snapshot CSS if we have one
                         if (lastSnapshot) {
                             lastSnapshot.css = cachedCSS;
                             if (lastSnapshot.stats) lastSnapshot.stats.cssSize = cachedCSS.length;
                         }
                     }
                 }
-            } catch (e) { /* keep old cache */ }
+            } catch (e) { }
         }
 
-        // --- 4. Fallback: if no push received in 30s and clients connected, do ONE snapshot ---
         const hasClients = wss.clients.size > 0;
-        if (hasClients && (now - lastPushTime) > FALLBACK_SNAPSHOT_INTERVAL && observerInjected) {
-            console.log('⚡ Fallback snapshot (no push received in 30s)');
-            try {
-                const snapshot = await Promise.race([
-                    captureSnapshot(cdpConnection),
-                    new Promise(resolve => setTimeout(() => resolve(null), 6000))
-                ]);
-                if (snapshot && snapshot !== '__unchanged__' && !snapshot.error) {
-                    const hash = hashString(snapshot.html);
-                    if (hash !== lastSnapshotHash) {
-                        lastSnapshot = snapshot;
-                        lastSnapshotHash = hash;
-                        broadcastSnapshotUpdate(wss);
-                        console.log(`📸 Fallback snapshot updated (hash: ${hash})`);
-                    }
-                }
-                lastPushTime = now; // Reset timer even if unchanged
-            } catch (e) {
-                console.error('Fallback snapshot error:', e.message);
-            }
+        if (hasClients && (now - lastPushTime) > FALLBACK_SNAPSHOT_INTERVAL) {
+            await fetchAndBroadcastSnapshot(wss);
+            lastPushTime = now;
         }
-
-        // Queue processing moved to independent startQueueDrainLoop (5s interval)
 
         setTimeout(healthCheck, HEALTH_CHECK_INTERVAL);
     };
@@ -2004,6 +2008,7 @@ async function createServer() {
     }
 
     const wss = new WebSocketServer({ server });
+    globalWss = wss;
 
     // Initialize Auth Token (wait for hashString to be available)
     AUTH_TOKEN = hashString(APP_PASSWORD + 'antigravity_salt');
@@ -2237,9 +2242,27 @@ async function createServer() {
         res.json(result);
     });
 
+    // Reconnect CDP without restarting IDE
+    app.post("/reconnect-cdp", async (req, res) => {
+        console.log("🔄 Manual CDP Reconnect requested...");
+        try {
+            if (cdpConnection && cdpConnection.ws) {
+                try { cdpConnection.ws.close(); } catch (e) { }
+                cdpConnection = null;
+            }
+            const endpoint = await discoverCDP();
+            cdpConnection = await connectCDP(endpoint.url);
+            console.log("  ✅ Reconnected to CDP on port", endpoint.port);
+            res.json({ success: true, message: "CDP reconnected", port: endpoint.port });
+        } catch (e) {
+            console.error("  ❌ Reconnect CDP failed:", e.message);
+            res.status(500).json({ error: "Failed to reconnect: " + e.message });
+        }
+    });
+
     // Restart IDE - Kill antigravity and restart with debug port
-    app.post('/restart-ide', async (req, res) => {
-        console.log('🔄 Restart IDE requested...');
+    app.post("/restart-ide", async (req, res) => {
+        console.log("🔄 Restart IDE requested...");
         try {
             // Close existing CDP connection first
             if (cdpConnection && cdpConnection.ws) {
@@ -2250,55 +2273,68 @@ async function createServer() {
             // Kill all antigravity processes EXCEPT this server
             const myPid = process.pid;
             try {
-                // pgrep -f antigravity returns PIDs separated by newlines
-                const pids = execSync('pgrep -f "antigravity" || true', { encoding: 'utf8' }).trim().split('\n');
-
-                // Filter out empty strings and our own PID
-                const toKill = pids.filter(pid => pid && pid.trim().length > 0 && pid.trim() !== String(myPid));
+                const psOut = execSync("ps -eo pid,args", { encoding: "utf8" });
+                const lines = psOut.split("\n");
+                const toKill = [];
+                for (const line of lines) {
+                    const match = line.trim().match(/^(\d+)\s+(.+)$/);
+                    if (!match) continue;
+                    const pid = parseInt(match[1], 10);
+                    const cmd = match[2];
+                    if (pid === myPid) continue;
+                    if (cmd.includes("server.js") || cmd.includes("antigravity_phone_chat")) continue;
+                    if (cmd.includes("antigravity-ide") || cmd.includes("language_server_linux") || (cmd.includes("antigravity") && !cmd.includes("gravityremote2"))) {
+                        toKill.push(pid);
+                    }
+                }
 
                 if (toKill.length > 0) {
-                    execSync(`kill ${toKill.join(' ')}`, { stdio: 'pipe' });
-                    console.log(`  ✅ Killed antigravity processes: ${toKill.join(', ')}`);
+                    execSync(`kill ${toKill.join(" ")} || true`, { stdio: "pipe" });
+                    console.log(`  ✅ Killed antigravity processes: ${toKill.join(", ")}`);
                 } else {
-                    console.log('  ⚠️  No other antigravity processes found');
+                    console.log("  ⚠️  No other antigravity processes found");
                 }
             } catch (e) {
-                console.log('  ⚠️  Error killing processes:', e.message);
+                console.log("  ⚠️  Error killing processes:", e.message);
             }
 
             // Wait for processes to die
             await new Promise(r => setTimeout(r, 2000));
 
             // Start antigravity with debug port
-            const child = spawn('antigravity', ['--remote-debugging-port=9222'], {
+            const child = spawn("/home/absolut7/.local/bin/antigravity", ["--remote-debugging-port=9222"], {
                 detached: true,
-                stdio: 'ignore',
-                env: { ...process.env }
+                stdio: "ignore",
+                env: {
+                    ...process.env,
+                    PATH: `/home/absolut7/.local/bin:${process.env.PATH || ""}`,
+                    DISPLAY: process.env.DISPLAY || ":0"
+                }
             });
             child.unref();
-            console.log('  🚀 Started antigravity --remote-debugging-port=9222 (PID:', child.pid, ')');
+            console.log("  🚀 Started antigravity --remote-debugging-port=9222 (PID:", child.pid, ")");
 
-            // Wait for IDE to boot and CDP to become available
-            res.json({ success: true, message: 'IDE restarting...', pid: child.pid });
+            // Respond immediately
+            res.json({ success: true, message: "IDE restarting...", pid: child.pid });
 
-            // Reconnect CDP after IDE boots (in background)
+            // Reconnect CDP after IDE boots
             setTimeout(async () => {
-                for (let attempt = 0; attempt < 15; attempt++) {
+                for (let attempt = 0; attempt < 20; attempt++) {
                     try {
                         const endpoint = await discoverCDP();
                         cdpConnection = await connectCDP(endpoint.url);
-                        console.log('  ✅ CDP reconnected after restart');
+                        console.log("  ✅ CDP reconnected after restart");
                         return;
                     } catch (e) {
-                        console.log(`  ⏳ CDP reconnect attempt ${attempt + 1}/15...`);
-                        await new Promise(r => setTimeout(r, 3000));
+                        console.log(`  ⏳ CDP reconnect attempt ${attempt + 1}/20...`);
+                        await new Promise(r => setTimeout(r, 2000));
                     }
                 }
-                console.error('  ❌ Failed to reconnect CDP after restart');
-            }, 5000);
+                console.error("  ❌ Failed to reconnect CDP after restart");
+            }, 3000);
 
         } catch (e) {
-            console.error('Restart IDE error:', e);
+            console.error("Restart IDE error:", e);
             res.status(500).json({ error: e.message });
         }
     });
@@ -2349,6 +2385,12 @@ async function createServer() {
             method: result.method || 'attempted',
             details: result
         });
+
+        if (result.ok !== false && globalWss) {
+            setTimeout(() => fetchAndBroadcastSnapshot(globalWss), 400);
+            setTimeout(() => fetchAndBroadcastSnapshot(globalWss), 1500);
+            setTimeout(() => fetchAndBroadcastSnapshot(globalWss), 3000);
+        }
     });
 
     // UI Inspection endpoint - Returns all buttons as JSON for debugging
@@ -2575,7 +2617,7 @@ async function main() {
         await initCDP();
     } catch (err) {
         console.warn(`⚠️  Initial CDP discovery failed: ${err.message}`);
-        console.log('💡 Start Antigravity with --remote-debugging-port=9000 to connect.');
+        console.log('💡 Start Antigravity with --remote-debugging-port=9222 to connect.');
     }
 
     try {
