@@ -677,6 +677,17 @@ async function sendMessage({ forceQueue = false, forceSend = false } = {}) {
     const text = messageInput.value.trim();
     if (!text && attachedImages.length === 0) return;
 
+    // Optimistic frontrunning bubble in the UI
+    try {
+        const bubble = document.createElement('div');
+        bubble.className = 'optimistic-user-bubble';
+        bubble.style.cssText = 'background: #2563eb; color: #ffffff; padding: 10px 14px; border-radius: 14px 14px 2px 14px; margin: 10px 8px 10px auto; max-width: 85%; font-size: 14px; line-height: 1.5; word-break: break-word; box-shadow: 0 2px 8px rgba(37,99,235,0.25); text-align: left;';
+        bubble.textContent = text || 'Sent image attachment';
+        chatContent.appendChild(bubble);
+        chatContainer.scrollTop = chatContainer.scrollHeight;
+    } catch(e) {}
+    if (!text && attachedImages.length === 0) return;
+
     if (sendBtn) sendBtn.disabled = true;
     if (queueBtn) queueBtn.disabled = true;
     messageInput.disabled = true;

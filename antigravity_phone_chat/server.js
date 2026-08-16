@@ -837,6 +837,9 @@ async function _injectMessageInner(cdp, text) {
                 for (let retry = 0; retry < 5; retry++) {
                     submit = document.querySelector('[data-tooltip-id="input-send-button-send-tooltip"]') ||
                              document.querySelector('[data-tooltip-id="input-send-button-pending-tooltip"]') ||
+                             document.querySelector('[data-tooltip-id*="queue" i]') ||
+                             document.querySelector('button[aria-label*="Queue" i]') ||
+                             document.querySelector('button[aria-label*="Interrupt" i]') ||
                              document.querySelector('button[aria-label^="Send" i]') ||
                              document.querySelector('button[aria-label*="Queue" i]') ||
                              document.querySelector('button svg.lucide-arrow-right')?.closest('button') ||
@@ -1606,6 +1609,16 @@ async function selectChat(cdp, { id, title } = {}) {
                 lastSnapshot = null;
                 lastLightCheck = null;
                 observerInjected = false;
+                setTimeout(async () => {
+                    try {
+                        await cdp.call("Runtime.evaluate", {
+                            expression: `(() => {
+                                const ed = document.querySelector(\'[data-lexical-editor="true"]\') || document.querySelector(\'div[contenteditable="true"]\') || document.querySelector(\'textarea\');
+                                if (ed) ed.focus();
+                            })()`, contextId: ctx.id
+                        });
+                    } catch (e) {}
+                }, 400);
                 if (globalWss) {
                     setTimeout(() => fetchAndBroadcastSnapshot(globalWss), 300);
                     setTimeout(() => fetchAndBroadcastSnapshot(globalWss), 900);
