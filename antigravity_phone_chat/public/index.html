@@ -12,7 +12,7 @@
     <link
         href="https://fonts.googleapis.com/css2?family=Amiri:ital,wght@0,400;0,700;1,400&family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
         rel="stylesheet">
-    <link rel="stylesheet" href="css/style.css?v=2.4">
+    <link rel="stylesheet" href="css/style.css?v=2.7">
     <link rel="icon"
         href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>⚡</text></svg>">
 </head>
@@ -50,7 +50,7 @@
             <button class="stop-btn" id="stopBtn" aria-label="STOP" title="Stop agent execution">
                 <span>■ STOP</span>
             </button>
-            <button class="history-btn" id="historyBtn" aria-label="Chat History" title="Browse Past Conversations">
+            <button class="history-btn" id="historyBtn" onclick="showChatHistory()" aria-label="Chat History" title="Browse Past Conversations">
                 <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
                     <path d="M12 8v4l3 3m6-3a9 9 0 1 1-18 0 9 9 0 0 1 18 0z" />
                 </svg>
@@ -133,6 +133,21 @@
 
     <!-- Input Section -->
     <div class="input-section">
+        <!-- Interactive Queue Tray (shows when messages are queued) -->
+        <div class="queue-tray" id="queueTray" style="display: none;">
+            <div class="queue-tray-left">
+                <span class="queue-badge" id="queueBadge">1 Queued</span>
+                <span class="queue-preview" id="queuePreview">Next: "..."</span>
+            </div>
+            <div class="queue-tray-actions">
+                <button class="queue-action-btn queue-send-now" id="queueSendNowBtn" title="Send next queued message immediately">
+                    <span>⚡ Send Now</span>
+                </button>
+                <button class="queue-action-btn queue-clear" id="queueClearBtn" title="Clear all queued messages">
+                    <span>✕ Clear</span>
+                </button>
+            </div>
+        </div>
         <!-- Image Preview Strip -->
         <div class="attach-preview" id="attachPreview" style="display: none;">
             <div class="attach-preview-inner" id="attachPreviewInner"></div>
@@ -148,7 +163,16 @@
                 </svg>
             </button>
             <textarea id="messageInput" placeholder="Message agent..." rows="1"></textarea>
-            <button class="send-btn" id="sendBtn" aria-label="Send">
+            <button class="stop-bar-btn" id="stopBarBtn" aria-label="Stop execution" title="Stop agent execution (Ctrl+D)" style="display: none;">
+                <span>■</span>
+            </button>
+            <button class="queue-btn" id="queueBtn" aria-label="Queue message" title="Add message to queue (sends when idle)">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M12 8v4l3 3m6-3a9 9 0 1 1-18 0 9 9 0 0 1 18 0z" />
+                </svg>
+                <span>Queue</span>
+            </button>
+            <button class="send-btn" id="sendBtn" aria-label="Send" title="Send prompt directly to agent">
                 <svg viewBox="0 0 24 24">
                     <path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"
                         style="fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round;" />
@@ -512,7 +536,7 @@
 
         if (lisanSentences.length > 0) { initLisanStream(); }
     </script>
-    <script src="js/app.js?v=2.4"></script>
+    <script src="js/app.js?v=2.7"></script>
 </body>
 
 </html>

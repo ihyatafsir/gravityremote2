@@ -53,8 +53,28 @@ let pendingPushFetch = false; // Whether a throttled push fetch is scheduled
 
 // Message queue — holds messages when agent is busy (terminal running)
 const messageQueue = [];
-const MAX_QUEUED_MESSAGES = 5;
+const MAX_QUEUED_MESSAGES = 10;
 let isProcessingQueue = false;
+
+function broadcastQueueUpdate(wss) {
+    const targetWss = wss || globalWss;
+    if (!targetWss) return;
+    const payload = JSON.stringify({
+        type: 'queue_update',
+        count: messageQueue.length,
+        items: messageQueue.map(m => ({
+            id: m.id,
+            text: m.text,
+            timestamp: m.timestamp,
+            attempts: m.attempts || 0
+        }))
+    });
+    for (const client of targetWss.clients) {
+        if (client.readyState === 1) { // WebSocket.OPEN
+            try { client.send(payload); } catch (e) { }
+        }
+    }
+}
 
 // Kill any existing process on the server port (prevents EADDRINUSE)
 function killPortProcess(port) {
@@ -145,20 +165,28 @@ async function discoverCDP() {
             const list = await getJson(`http://127.0.0.1:${port}/json/list`, 1000);
             if (!Array.isArray(list)) return null;
 
-            // Priority 1: Standard Workbench (The main window)
-            const workbench = list.find(t => t.url?.includes('workbench.html') || (t.title && t.title.includes('workbench')));
+            // Filter out self/3000 pages to avoid loopback
+            const validList = list.filter(t => {
+                const url = (t.url || "").toLowerCase();
+                const title = (t.title || "").toLowerCase();
+                if (url.includes(":3000") || title.includes("phone connect") || title.includes("gravityremote")) return false;
+                return true;
+            });
+
+            // Priority 1: Standard Workbench (The main IDE window)
+            const workbench = validList.find(t => t.url?.includes("workbench.html") || (t.title && (t.title.includes("workbench") || t.title.includes("Antigravity IDE"))));
             if (workbench && workbench.webSocketDebuggerUrl) {
                 return { priority: 1, port, url: workbench.webSocketDebuggerUrl, title: workbench.title };
             }
 
             // Priority 2: Jetski/Launchpad (Fallback)
-            const jetski = list.find(t => t.url?.includes('jetski') || t.title === 'Launchpad');
+            const jetski = validList.find(t => t.url?.includes("jetski") || t.title === "Launchpad");
             if (jetski && jetski.webSocketDebuggerUrl) {
                 return { priority: 2, port, url: jetski.webSocketDebuggerUrl, title: jetski.title };
             }
 
-            // Priority 3: Any page
-            const page = list.find(t => t.type === 'page' && t.webSocketDebuggerUrl);
+            // Priority 3: Any other valid page
+            const page = validList.find(t => t.type === "page" && t.webSocketDebuggerUrl);
             if (page) {
                 return { priority: 3, port, url: page.webSocketDebuggerUrl, title: page.title };
             }
@@ -353,44 +381,73 @@ async function ensureCDP() {
     }
 }
 
-// Lightweight "is agent busy?" probe — only checks the cancel button, no inject attempt
+// Lightweight "is agent busy?" probe — checks cancel buttons and active state
 // Returns true if agent is busy (cancel button visible), false if idle
 async function isAgentBusy(cdp) {
-    if (!cdp || cdp.ws?.readyState !== WebSocket.OPEN) return true; // Assume busy if no connection
+    if (!cdp || cdp.ws?.readyState !== WebSocket.OPEN) return true;
 
-    // Try cached cascade context first, then scan up to 2
+    const PROBE_SCRIPT = `(() => {
+        const cancel = document.querySelector('[data-tooltip-id="input-send-button-cancel-tooltip"]') ||
+                       document.querySelector('button[aria-label*="Cancel" i]') ||
+                       document.querySelector('button[aria-label*="Stop" i]') ||
+                       document.querySelector('button[title*="Cancel" i]') ||
+                       document.querySelector('button[title*="Stop" i]') ||
+                       document.querySelector('button svg.lucide-square')?.closest('button') ||
+                       document.querySelector('button .bg-red-500')?.closest('button') ||
+                       document.querySelector('button svg.lucide-stop-circle')?.closest('button') ||
+                       document.querySelector('button svg.lucide-circle-stop')?.closest('button');
+        if (cancel && cancel.offsetParent !== null) return "busy";
+
+        const editor = document.querySelector('div[contenteditable="true"][role="combobox"]') ||
+                       document.querySelector('div[contenteditable="true"][aria-label="Message input"]') ||
+                       document.querySelector('[data-lexical-editor="true"][contenteditable="true"]') ||
+                       document.querySelector('div[contenteditable="true"][role="textbox"]') ||
+                       document.querySelector('div[contenteditable="true"]');
+        if (editor && editor.offsetParent !== null) return "idle";
+        return "unknown";
+    })()`;
+
+    // Try default context first
+    try {
+        const res = await Promise.race([
+            cdp.call("Runtime.evaluate", {
+                expression: PROBE_SCRIPT,
+                returnByValue: true
+            }),
+            new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 1200))
+        ]);
+        const val = res.result?.value;
+        if (val === "busy") return true;
+        if (val === "idle") return false;
+    } catch (e) { }
+
+    // Try tracked contexts
     const ctxIds = [];
     if (cachedCascadeCtxId && cdp.contexts.some(c => c.id === cachedCascadeCtxId)) {
         ctxIds.push(cachedCascadeCtxId);
     }
     for (const ctx of cdp.contexts) {
-        if (ctx.origin?.includes('extension') || ctx.name?.includes('worker')) continue;
+        if (ctx.origin?.includes("extension") || ctx.name?.includes("worker")) continue;
         if (!ctxIds.includes(ctx.id)) ctxIds.push(ctx.id);
-        if (ctxIds.length >= 2) break;
+        if (ctxIds.length >= 3) break;
     }
 
     for (const ctxId of ctxIds) {
         try {
             const result = await Promise.race([
                 cdp.call("Runtime.evaluate", {
-                    expression: `(() => {
-                        const cancel = document.querySelector('[data-tooltip-id="input-send-button-cancel-tooltip"]');
-                        if (cancel && cancel.offsetParent !== null) return "busy";
-                        const editor = document.querySelector('[data-lexical-editor="true"][contenteditable="true"][role="textbox"]');
-                        if (editor && editor.offsetParent !== null) return "idle";
-                        return "unknown";
-                    })()`,
+                    expression: PROBE_SCRIPT,
                     returnByValue: true,
                     contextId: ctxId
                 }),
-                new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 1500))
+                new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 1200))
             ]);
             const val = result.result?.value;
             if (val === "busy") return true;
             if (val === "idle") return false;
-        } catch (e) { /* try next context */ }
+        } catch (e) { }
     }
-    return true; // Unknown = assume busy
+    return false;
 }
 
 // Lightweight pre-check: just get innerHTML length + scroll position without cloning DOM
@@ -659,7 +716,6 @@ async function captureSnapshot(cdp) {
 // Inject message into Antigravity — routes through Agent Mode (Ctrl+E)
 // Heavily optimized: cached context, 2s timeouts, 12s overall limit
 async function injectMessage(cdp, text) {
-    // Overall timeout: never let this function hang > 12s
     return Promise.race([
         _injectMessageInner(cdp, text),
         new Promise(resolve => setTimeout(() => resolve({ ok: false, error: 'inject_timeout_12s' }), 12000))
@@ -667,186 +723,151 @@ async function injectMessage(cdp, text) {
 }
 
 async function _injectMessageInner(cdp, text) {
-    // Wait for contexts (brief)
-    if (cdp.contexts.length === 0) {
-        await new Promise(r => setTimeout(r, 500));
-        if (cdp.contexts.length === 0) {
-            return { ok: false, error: 'no_contexts_available' };
-        }
+    let cascadeCtxId = undefined;
+
+    const FIND_EDITOR_EXPR = `(() => {
+        const editor = document.querySelector('div[contenteditable="true"][role="combobox"]') ||
+                       document.querySelector('div[contenteditable="true"][aria-label="Message input"]') ||
+                       document.querySelector('[data-lexical-editor="true"][contenteditable="true"]') ||
+                       document.querySelector('div[contenteditable="true"][role="textbox"]') ||
+                       document.querySelector('div[contenteditable="true"]');
+        if (editor && editor.offsetParent !== null) return "found";
+        return "not_found";
+    })()`;
+
+    // 1. Check candidate contexts in priority order
+    const candidateCtxIds = [];
+    if (cachedCascadeCtxId !== null && cachedCascadeCtxId !== undefined && cdp.contexts.some(c => c.id === cachedCascadeCtxId)) {
+        candidateCtxIds.push(cachedCascadeCtxId);
+    }
+    if (cachedSnapshotCtxId !== null && cachedSnapshotCtxId !== undefined && cdp.contexts.some(c => c.id === cachedSnapshotCtxId) && !candidateCtxIds.includes(cachedSnapshotCtxId)) {
+        candidateCtxIds.push(cachedSnapshotCtxId);
+    }
+    candidateCtxIds.push(null); // default context
+    for (const ctx of cdp.contexts) {
+        if (ctx.origin?.includes("extension") || ctx.name?.includes("worker")) continue;
+        if (!candidateCtxIds.includes(ctx.id)) candidateCtxIds.push(ctx.id);
     }
 
-    // Step 1: Find cascade context (use cache first, then scan max 3)
-    let cascadeCtxId = null;
-    let alreadyInAgentMode = false;
-
-    // Try cached context first (instant)
-    if (cachedCascadeCtxId && cdp.contexts.some(c => c.id === cachedCascadeCtxId)) {
+    for (const ctxId of candidateCtxIds) {
         try {
-            const result = await Promise.race([
-                cdp.call("Runtime.evaluate", {
-                    expression: `(() => {
-                        const isCascade = document.querySelector('[data-tooltip-id="cascade-header-menu"]') ||
-                                          document.querySelector('[data-tooltip-id="new-conversation-tooltip"]') ||
-                                          document.querySelector('[data-tooltip-id="history-tooltip"]');
-                        if (!isCascade) return "wrong_context";
-                        const cancel = document.querySelector('[data-tooltip-id="input-send-button-cancel-tooltip"]');
-                        if (cancel && cancel.offsetParent !== null) return "busy";
-                        const editor = document.querySelector('[data-lexical-editor="true"][contenteditable="true"][role="textbox"]') ||
-                                       document.querySelector('div[contenteditable="true"][role="textbox"]');
-                        if (editor && editor.offsetParent !== null) return "agent_ready";
-                        return "ready";
-                    })()`,
-                    returnByValue: true,
-                    contextId: cachedCascadeCtxId
-                }),
-                new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 2000))
+            const probeParams = { expression: FIND_EDITOR_EXPR, returnByValue: true };
+            if (ctxId !== null) probeParams.contextId = ctxId;
+            const probe = await Promise.race([
+                cdp.call("Runtime.evaluate", probeParams),
+                new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 1200))
             ]);
-            const val = result.result?.value;
-            if (val === "busy") return { ok: false, reason: "busy" };
-            if (val === "agent_ready") { cascadeCtxId = cachedCascadeCtxId; alreadyInAgentMode = true; }
-            else if (val === "ready") { cascadeCtxId = cachedCascadeCtxId; }
-            else { cachedCascadeCtxId = null; } // Cache invalid
-        } catch (e) { cachedCascadeCtxId = null; }
+            if (probe.result?.value === "found") {
+                cascadeCtxId = ctxId;
+                if (ctxId !== null) cachedCascadeCtxId = ctxId;
+                break;
+            }
+        } catch (e) { }
     }
 
-    // Scan contexts if cache missed (limit to 3, skip obviously-wrong ones)
-    if (!cascadeCtxId) {
-        let scanned = 0;
-        for (const ctx of cdp.contexts) {
-            // Skip extension/worker contexts
-            if (ctx.origin?.includes('extension') || ctx.name?.includes('worker')) continue;
-            if (scanned++ >= 3) break; // Max 3 context probes
-            try {
-                const result = await Promise.race([
-                    cdp.call("Runtime.evaluate", {
-                        expression: `(() => {
-                            const isCascade = document.querySelector('[data-tooltip-id="cascade-header-menu"]') ||
-                                              document.querySelector('[data-tooltip-id="new-conversation-tooltip"]') ||
-                                              document.querySelector('[data-tooltip-id="history-tooltip"]');
-                            if (!isCascade) return "wrong_context";
-                            const cancel = document.querySelector('[data-tooltip-id="input-send-button-cancel-tooltip"]');
-                            if (cancel && cancel.offsetParent !== null) return "busy";
-                            const editor = document.querySelector('[data-lexical-editor="true"][contenteditable="true"][role="textbox"]') ||
-                                           document.querySelector('div[contenteditable="true"][role="textbox"]');
-                            if (editor && editor.offsetParent !== null) return "agent_ready";
-                            return "ready";
-                        })()`,
-                        returnByValue: true,
-                        contextId: ctx.id
-                    }),
-                    new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 2000))
-                ]);
-                const val = result.result?.value;
-                if (val === "busy") { cachedCascadeCtxId = ctx.id; return { ok: false, reason: "busy" }; }
-                if (val === "agent_ready") { cascadeCtxId = ctx.id; cachedCascadeCtxId = ctx.id; alreadyInAgentMode = true; break; }
-                if (val === "ready") { cascadeCtxId = ctx.id; cachedCascadeCtxId = ctx.id; break; }
-            } catch (e) { }
-        }
-    }
+    // 3. Focus editor and clear previous text
+    const focusParams = {
+        expression: `(() => {
+            let editor = document.querySelector('div[contenteditable="true"][role="combobox"]') ||
+                         document.querySelector('div[contenteditable="true"][aria-label="Message input"]') ||
+                         document.querySelector('[data-lexical-editor="true"][contenteditable="true"]') ||
+                         document.querySelector('div[contenteditable="true"][role="textbox"]') ||
+                         document.querySelector('div[contenteditable="true"]');
+            if (!editor) {
+                const cascadePanel = document.querySelector('#conversation, #chat, #cascade');
+                if (cascadePanel) {
+                    const editables = [...cascadePanel.querySelectorAll('[contenteditable="true"]')]
+                        .filter(el => el.offsetParent !== null);
+                    editor = editables.at(-1);
+                }
+            }
+            if (!editor) return { ok: false, error: "editor_not_found" };
+            editor.focus();
+            const sel = window.getSelection();
+            if (sel) {
+                sel.removeAllRanges();
+                const range = document.createRange();
+                range.selectNodeContents(editor);
+                sel.addRange(range);
+            }
+            document.execCommand("delete");
+            return { ok: true };
+        })()`,
+        returnByValue: true
+    };
+    if (cascadeCtxId) focusParams.contextId = cascadeCtxId;
 
-    if (!cascadeCtxId) {
-        return { ok: false, error: "cascade_not_found" };
-    }
-
-    // Step 2: Ctrl+E for agent mode (only if needed)
-    if (!alreadyInAgentMode) {
-        try {
-            await cdp.call("Input.dispatchKeyEvent", {
-                type: "keyDown", key: "e", code: "KeyE",
-                modifiers: 2, windowsVirtualKeyCode: 69, nativeVirtualKeyCode: 69
-            });
-            await cdp.call("Input.dispatchKeyEvent", {
-                type: "keyUp", key: "e", code: "KeyE",
-                modifiers: 2, windowsVirtualKeyCode: 69, nativeVirtualKeyCode: 69
-            });
-            console.log('[INJECT] Sent Ctrl+E');
-        } catch (e) {
-            return { ok: false, error: "ctrl_e_failed: " + e.message };
-        }
-    }
-
-    // Wait for agent mode (reduced from 800ms)
-    await new Promise(r => setTimeout(r, 400));
-
-    // Step 3: Focus editor and type
     try {
         const focusResult = await Promise.race([
-            cdp.call("Runtime.evaluate", {
-                expression: `(() => {
-                    let editor = document.querySelector('[data-lexical-editor="true"][contenteditable="true"][role="textbox"]');
-                    if (!editor) editor = document.querySelector('div[contenteditable="true"][role="textbox"]');
-                    if (!editor) {
-                        const cascadePanel = document.querySelector('#cascade, #conversation, #chat');
-                        if (cascadePanel) {
-                            const editables = [...cascadePanel.querySelectorAll('[contenteditable="true"]')]
-                                .filter(el => el.offsetParent !== null);
-                            editor = editables.at(-1);
-                        }
-                    }
-                    if (!editor) return { ok: false, error: "editor_not_found" };
-                    editor.focus();
-                    const sel = window.getSelection();
-                    if (sel) sel.selectAllChildren(editor);
-                    document.execCommand('delete');
-                    return { ok: true };
-                })()`,
-                returnByValue: true,
-                contextId: cascadeCtxId
-            }),
-            new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 2000))
+            cdp.call("Runtime.evaluate", focusParams),
+            new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 2000))
         ]);
 
         if (focusResult.result?.value?.ok === false) {
             return { ok: false, error: focusResult.result.value.error || "focus_failed" };
         }
 
+        await new Promise(r => setTimeout(r, 100));
+
+        // Insert text via CDP native typing
         await cdp.call("Input.insertText", { text });
-        console.log('[INJECT] Typed text');
+        console.log(`[INJECT] Typed ${text.length} chars`);
 
         await new Promise(r => setTimeout(r, 200));
     } catch (e) {
         return { ok: false, error: "insert_exception: " + e.message };
     }
 
-    // Step 4: Click send button (reduced timeout from 8s to 3s)
-    await new Promise(r => setTimeout(r, 300));
-
+    // 4. Submit message (Enter key + Button click)
     try {
+        await cdp.call("Input.dispatchKeyEvent", {
+            type: "rawKeyDown", key: "Enter", code: "Enter",
+            windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13
+        });
+        await cdp.call("Input.dispatchKeyEvent", {
+            type: "keyUp", key: "Enter", code: "Enter",
+            windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13
+        });
+
+        await new Promise(r => setTimeout(r, 100));
+
+        const clickParams = {
+            expression: `(async () => {
+                let submit = null;
+                for (let retry = 0; retry < 5; retry++) {
+                    submit = document.querySelector('[data-tooltip-id="input-send-button-send-tooltip"]') ||
+                             document.querySelector('[data-tooltip-id="input-send-button-pending-tooltip"]') ||
+                             document.querySelector('button[aria-label^="Send" i]') ||
+                             document.querySelector('button[aria-label*="Queue" i]') ||
+                             document.querySelector('button svg.lucide-arrow-right')?.closest('button') ||
+                             document.querySelector('button svg.lucide-corner-down-left')?.closest('button');
+                    if (submit && !submit.disabled && submit.offsetParent !== null) break;
+                    submit = null;
+                    await new Promise(r => setTimeout(r, 80));
+                }
+                if (submit && !submit.disabled) {
+                    submit.click();
+                    try {
+                        submit.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
+                    } catch(e) {}
+                    return { ok: true, method: "button_click" };
+                }
+                return { ok: true, method: "enter_key_submit" };
+            })()`,
+            returnByValue: true,
+            awaitPromise: true
+        };
+        if (cascadeCtxId) clickParams.contextId = cascadeCtxId;
+
         const clickResult = await Promise.race([
-            cdp.call("Runtime.evaluate", {
-                expression: `(async () => {
-                    let submit = null;
-                    for (let retry = 0; retry < 4; retry++) {
-                        submit = document.querySelector('[data-tooltip-id="input-send-button-send-tooltip"]');
-                        if (submit && !submit.disabled) break;
-                        submit = document.querySelector("svg.lucide-arrow-right")?.closest("button");
-                        if (submit && !submit.disabled) break;
-                        submit = document.querySelector('[data-tooltip-id="input-send-button-pending-tooltip"]');
-                        if (submit && !submit.disabled) break;
-                        submit = null;
-                        await new Promise(r => setTimeout(r, 150));
-                    }
-                    if (submit && !submit.disabled) {
-                        submit.click();
-                        return { ok: true, method: "agent_mode_submit" };
-                    }
-                    return { ok: false, error: "send_btn_not_found" };
-                })()`,
-                returnByValue: true,
-                awaitPromise: true,
-                contextId: cascadeCtxId
-            }),
-            new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 3000))
+            cdp.call("Runtime.evaluate", clickParams),
+            new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 3000))
         ]);
 
-        if (clickResult.result?.value) {
-            return clickResult.result.value;
-        }
+        return clickResult.result?.value || { ok: true, method: "submitted" };
     } catch (e) {
-        return { ok: false, error: "click_timeout: " + e.message };
+        return { ok: true, method: "enter_fallback" };
     }
-
-    return { ok: false, error: "click_failed" };
 }
 
 // Set functionality mode (Fast vs Planning)
@@ -948,62 +969,127 @@ async function setMode(cdp, mode) {
     return { error: 'Context failed' };
 }
 
-// Stop Generation
+// Stop Generation — cancels generation reliably and clears messageQueue
 async function stopGeneration(cdp) {
-    // Step 1: Find the cascade-panel context and try clicking the cancel button
-    for (const ctx of cdp.contexts) {
-        try {
-            const res = await Promise.race([
-                cdp.call("Runtime.evaluate", {
-                    expression: `(() => {
-                        // Verify cascade-panel context
-                        const isCascade = document.querySelector('[data-tooltip-id="cascade-header-menu"]') ||
-                                          document.querySelector('[data-tooltip-id="new-conversation-tooltip"]') ||
-                                          document.querySelector('[data-tooltip-id="history-tooltip"]');
-                        if (!isCascade) return { skip: true };
-                        
-                        // Look for the cancel button
-                        const cancel = document.querySelector('[data-tooltip-id="input-send-button-cancel-tooltip"]');
-                        if (cancel && cancel.offsetParent !== null) {
-                            cancel.click();
-                            return { success: true, method: "cancel_click" };
-                        }
-                        
-                        // Fallback: square icon button
-                        const stopBtn = document.querySelector('button svg.lucide-square')?.closest('button');
-                        if (stopBtn && stopBtn.offsetParent !== null) {
-                            stopBtn.click();
-                            return { success: true, method: "square_click" };
-                        }
-                        
-                        return { error: "No active generation found to stop" };
-                    })()`,
-                    returnByValue: true,
-                    contextId: ctx.id
-                }),
-                new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 3000))
-            ]);
+    let stopped = false;
+    let method = "none";
 
-            const val = res.result?.value;
-            if (val?.skip) continue;
-            if (val?.success) return val;
-            if (val?.error) {
-                // Found cascade panel but no cancel button — try Escape key via CDP
-                try {
-                    await cdp.call("Input.dispatchKeyEvent", {
-                        type: "keyDown", key: "Escape", code: "Escape", keyCode: 27
-                    });
-                    await cdp.call("Input.dispatchKeyEvent", {
-                        type: "keyUp", key: "Escape", code: "Escape", keyCode: 27
-                    });
-                    return { success: true, method: "escape_key" };
-                } catch (e) {
-                    return val;
+    const CANCEL_SCRIPT = `(() => {
+        const cancel = document.querySelector('[data-tooltip-id="input-send-button-cancel-tooltip"]') ||
+                       document.querySelector('button[aria-label*="Cancel" i]') ||
+                       document.querySelector('button[aria-label*="Stop" i]') ||
+                       document.querySelector('button[title*="Cancel" i]') ||
+                       document.querySelector('button[title*="Stop" i]') ||
+                       document.querySelector('button svg.lucide-square')?.closest('button') ||
+                       document.querySelector('button .bg-red-500')?.closest('button') ||
+                       document.querySelector('button svg.lucide-stop-circle')?.closest('button') ||
+                       document.querySelector('button svg.lucide-circle-stop')?.closest('button');
+        if (cancel && cancel.offsetParent !== null) {
+            cancel.click();
+            try {
+                cancel.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
+                cancel.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, cancelable: true, view: window }));
+                cancel.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, view: window }));
+                cancel.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, view: window }));
+                cancel.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, cancelable: true, view: window }));
+            } catch (e) {}
+            return { success: true, method: "cancel_button_click" };
+        }
+        return { not_found: true };
+    })()`;
+
+    // 1. Try finding and clicking cancel in default context
+    try {
+        const res = await Promise.race([
+            cdp.call("Runtime.evaluate", {
+                expression: CANCEL_SCRIPT,
+                returnByValue: true
+            }),
+            new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 2000))
+        ]);
+        const val = res.result?.value;
+        if (val?.success) {
+            stopped = true;
+            method = val.method;
+        }
+    } catch (e) { }
+
+    // 2. Try across tracked contexts
+    if (!stopped && cdp.contexts && cdp.contexts.length > 0) {
+        for (const ctx of cdp.contexts) {
+            try {
+                const res = await Promise.race([
+                    cdp.call("Runtime.evaluate", {
+                        expression: CANCEL_SCRIPT,
+                        returnByValue: true,
+                        contextId: ctx.id
+                    }),
+                    new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 2000))
+                ]);
+                const val = res.result?.value;
+                if (val?.success) {
+                    stopped = true;
+                    method = val.method;
+                    break;
                 }
-            }
-        } catch (e) { }
+            } catch (e) { }
+        }
     }
-    return { error: 'Cascade panel not found in any context' };
+
+    // 3. Dispatch native keyboard shortcuts (Ctrl+D, Escape, Ctrl+C)
+    try {
+        // Ctrl+D (Antigravity stop generation)
+        await cdp.call("Input.dispatchKeyEvent", {
+            type: "rawKeyDown", key: "d", code: "KeyD",
+            modifiers: 2, windowsVirtualKeyCode: 68, nativeVirtualKeyCode: 68
+        });
+        await cdp.call("Input.dispatchKeyEvent", {
+            type: "keyUp", key: "d", code: "KeyD",
+            modifiers: 2, windowsVirtualKeyCode: 68, nativeVirtualKeyCode: 68
+        });
+
+        // Escape (Abort)
+        await cdp.call("Input.dispatchKeyEvent", {
+            type: "rawKeyDown", key: "Escape", code: "Escape", keyCode: 27, windowsVirtualKeyCode: 27
+        });
+        await cdp.call("Input.dispatchKeyEvent", {
+            type: "keyUp", key: "Escape", code: "Escape", keyCode: 27, windowsVirtualKeyCode: 27
+        });
+
+        // Ctrl+C (Terminal abort)
+        await cdp.call("Input.dispatchKeyEvent", {
+            type: "rawKeyDown", key: "c", code: "KeyC",
+            modifiers: 2, windowsVirtualKeyCode: 67, nativeVirtualKeyCode: 67
+        });
+        await cdp.call("Input.dispatchKeyEvent", {
+            type: "keyUp", key: "c", code: "KeyC",
+            modifiers: 2, windowsVirtualKeyCode: 67, nativeVirtualKeyCode: 67
+        });
+
+        if (!stopped) {
+            stopped = true;
+            method = "keyboard_shortcut";
+        }
+    } catch (e) {
+        console.warn("Keyboard cancel dispatch error:", e.message);
+    }
+
+    // 4. Clear server messageQueue on Stop
+    const clearedCount = messageQueue.length;
+    messageQueue.length = 0;
+    isProcessingQueue = false;
+    if (clearedCount > 0) {
+        console.log(`🛑 Cleared ${clearedCount} pending queued message(s) on Stop.`);
+    }
+
+    // 5. Force snapshot refresh and broadcast immediately
+    if (globalWss) {
+        setTimeout(() => fetchAndBroadcastSnapshot(globalWss), 200);
+        setTimeout(() => fetchAndBroadcastSnapshot(globalWss), 800);
+        broadcastQueueUpdate(globalWss);
+    }
+
+    return { success: true, method, clearedQueue: clearedCount };
 }
 
 // Click Element (Remote)
@@ -1331,252 +1417,204 @@ async function startNewChat(cdp) {
         return { error: 'Shortcut failed: ' + e.message };
     }
 }
-// Get Chat History - Two-phase: click in iframe context, scrape from parent context
-async function getChatHistory(cdp) {
-    // Phase 1: Click the history button (runs in iframe context where button lives)
-    const CLICK_EXP = `(async () => {
-        try {
-            let historyBtn = document.querySelector('[data-tooltip-id="history-tooltip"]');
-            if (!historyBtn) {
-                historyBtn = document.querySelector('[data-tooltip-id*="history"], [data-tooltip-id*="past"], [data-tooltip-id*="recent"]');
-            }
-            if (!historyBtn) {
-                const newChatBtn = document.querySelector('[data-tooltip-id="new-conversation-tooltip"]');
-                if (newChatBtn) {
-                    const parent = newChatBtn.parentElement;
-                    if (parent) {
-                        const siblings = Array.from(parent.children).filter(el => el !== newChatBtn);
-                        historyBtn = siblings.find(el => el.tagName === 'A' || el.tagName === 'BUTTON' || el.getAttribute('role') === 'button');
+// Get Chat History - Smart check if panel open or click to open & scrape
+function getLocalBrainChats() {
+    try {
+        const brainDir = "/home/absolut7/.gemini/antigravity-ide/brain";
+        if (!fs.existsSync(brainDir)) return [];
+        const entries = fs.readdirSync(brainDir, { withFileTypes: true });
+        const chats = [];
+        const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+        for (const entry of entries) {
+            if (!entry.isDirectory() || !uuidRegex.test(entry.name)) continue;
+            const logPath = join(brainDir, entry.name, ".system_generated", "logs", "transcript.jsonl");
+            let title = entry.name;
+            let mtime = 0;
+            try {
+                const stat = fs.statSync(join(brainDir, entry.name));
+                mtime = stat.mtimeMs;
+                if (fs.existsSync(logPath)) {
+                    const line = fs.readFileSync(logPath, "utf8").split("\n")[0];
+                    if (line) {
+                        const parsed = JSON.parse(line);
+                        if (parsed.content) {
+                            title = parsed.content.slice(0, 60).replace(/\n/g, " ");
+                        }
                     }
                 }
-            }
-            if (!historyBtn) return { clicked: false };
-            historyBtn.click();
-            return { clicked: true };
-        } catch(e) {
-            return { clicked: false, error: e.toString() };
+            } catch (e) {}
+            chats.push({ id: entry.name, title, mtime, date: "Recent" });
         }
-    })()`;
-
-    // Phase 2: Scrape the history panel - tries cascade + workbench contexts
-    const SCRAPE_EXP = `(async () => {
-        try {
-            const chats = [];
-            const seenTitles = new Set();
-            const SKIP = new Set(['current', 'current conversation', 'other conversations',
-                'now', 'recent', 'blocked on your input', 'select a conversation',
-                'no conversations', 'loading']);
-            
-            function isConversationTitle(text) {
-                if (!text || text.length < 3 || text.length > 200) return false;
-                const lower = text.toLowerCase();
-                if (SKIP.has(lower)) return false;
-                if (lower.endsWith(' ago')) return false;
-                if (/^\\d+\\s*(sec|min|hr|day|wk|mo|yr|mins?|hours?|days?|weeks?)/i.test(lower)) return false;
-                if (lower.startsWith('show ') && lower.includes('more')) return false;
-                if (lower.startsWith('recent in ')) return false;
-                if (/^[\\d:]+$/.test(lower)) return false; // timestamps
-                return true;
-            }
-            
-            function addChat(text) {
-                text = text.trim();
-                if (!isConversationTitle(text)) return false;
-                if (seenTitles.has(text)) return false;
-                seenTitles.add(text);
-                chats.push({ title: text, date: 'Recent' });
-                return true;
-            }
-            
-            // Strategy 1: VS Code Quick Pick / Quick Input list items
-            const listItems = document.querySelectorAll(
-                '.monaco-list-row, .quick-input-list-entry, [role="listitem"], [role="option"], [role="treeitem"]'
-            );
-            for (const item of listItems) {
-                const label = item.querySelector('.label-name, .label-description, .quick-input-list-label');
-                const text = label?.textContent || item.querySelector('span')?.textContent || item.textContent;
-                addChat(text || '');
-                if (chats.length >= 50) break;
-            }
-            
-            // Strategy 2: cursor-pointer items (custom Cascade UI)
-            if (chats.length === 0) {
-                const clickableItems = document.querySelectorAll('[class*="cursor-pointer"]');
-                for (const item of clickableItems) {
-                    const titleEl = item.querySelector('span[class*="truncate"], span[class*="text-sm"]') || item.querySelector('span');
-                    if (titleEl) addChat(titleEl.textContent || '');
-                    if (chats.length >= 50) break;
-                }
-            }
-            
-            // Strategy 3: Scan visible spans that look like conversation titles
-            if (chats.length === 0) {
-                const allSpans = document.querySelectorAll('span');
-                for (const span of allSpans) {
-                    if (span.offsetParent === null) continue; // not visible
-                    addChat(span.textContent || '');
-                    if (chats.length >= 50) break;
-                }
-            }
-            
-            // Debug info for troubleshooting when empty
-            let debug = null;
-            if (chats.length === 0) {
-                const allRoles = [...new Set([...document.querySelectorAll('[role]')].map(el => el.getAttribute('role')))];
-                const visibleInputs = [...document.querySelectorAll('input')].filter(i => i.offsetParent !== null).map(i => i.placeholder).slice(0, 5);
-                const monacoRows = document.querySelectorAll('.monaco-list-row').length;
-                const allSpanCount = [...document.querySelectorAll('span')].filter(s => s.offsetParent !== null && s.textContent.length > 3).length;
-                debug = { allRoles: allRoles.slice(0, 10), visibleInputs, monacoRows, visibleSpanCount: allSpanCount };
-            }
-            
-            return { found: true, success: true, chats, debug };
-        } catch(e) {
-            return { found: false, error: e.toString() };
-        }
-    })()`;
-
-    // Phase 1: Click the history button in the cascade iframe context
-    let clicked = false;
-    let cascadeCtxId = null;
-    for (const ctx of cdp.contexts) {
-        try {
-            const res = await cdp.call("Runtime.evaluate", {
-                expression: CLICK_EXP,
-                returnByValue: true,
-                awaitPromise: true,
-                contextId: ctx.id
-            });
-            if (res.result?.value?.clicked) {
-                clicked = true;
-                cascadeCtxId = ctx.id;
-                break;
-            }
-        } catch (e) { }
+        chats.sort((a, b) => b.mtime - a.mtime);
+        return chats.slice(0, 30);
+    } catch (e) {
+        return [];
     }
-
-    if (!clicked) {
-        return { error: 'History button not found in any context', chats: [] };
-    }
-
-    // Wait for the panel to open
-    await new Promise(r => setTimeout(r, 1500));
-
-    // Phase 2: Scrape from ALL contexts — try cascade context first since panel may open there
-    const contextsToTry = [
-        ...cdp.contexts.filter(c => c.id === cascadeCtxId),
-        ...cdp.contexts.filter(c => c.id !== cascadeCtxId)
-    ];
-
-    let bestResult = null;
-    for (const ctx of contextsToTry) {
-        try {
-            const res = await cdp.call("Runtime.evaluate", {
-                expression: SCRAPE_EXP,
-                returnByValue: true,
-                awaitPromise: true,
-                contextId: ctx.id
-            });
-            if (res.result?.value?.found) {
-                const val = res.result.value;
-                val._contextId = ctx.id;
-                if (val.chats && val.chats.length > 0) {
-                    // Close the panel after scraping
-                    try {
-                        await cdp.call("Input.dispatchKeyEvent", { type: "keyDown", key: "Escape", code: "Escape" });
-                        await cdp.call("Input.dispatchKeyEvent", { type: "keyUp", key: "Escape", code: "Escape" });
-                    } catch (e) { }
-                    return val;
-                }
-                if (!bestResult || (val.debug && !bestResult.debug)) bestResult = val;
-            }
-        } catch (e) { }
-    }
-
-    // Close the panel even if we didn't find anything
-    try {
-        await cdp.call("Input.dispatchKeyEvent", { type: "keyDown", key: "Escape", code: "Escape" });
-        await cdp.call("Input.dispatchKeyEvent", { type: "keyUp", key: "Escape", code: "Escape" });
-    } catch (e) { }
-
-    return bestResult || { success: true, chats: [], debug: { clicked, panelNotScraped: true } };
 }
 
-async function selectChat(cdp, chatTitle) {
-    const safeChatTitle = JSON.stringify(chatTitle);
+async function getChatHistory(cdp) {
+    if (!cdp) return { success: true, count: 0, chats: getLocalBrainChats() };
 
-    const EXP = `(async () => {
+    const SCRAPE_EXP = `(async () => {
         try {
-            const targetTitle = ${safeChatTitle};
-
-            // 1. Open history panel if not already open
-            let historyBtn = document.querySelector('[data-tooltip-id="history-tooltip"]') ||
-                             document.querySelector('[data-past-conversations-toggle="true"]') ||
-                             document.querySelector('[data-tooltip-id*="history"]');
-            
-            if (historyBtn) {
-                historyBtn.click();
-                await new Promise(r => setTimeout(r, 600));
+            let items = Array.from(document.querySelectorAll('div[id^="fastpick-item-"]'));
+            let opened = false;
+            if (items.length === 0) {
+                const btn = document.querySelector('a[data-tooltip-id="history-tooltip"]') ||
+                            document.querySelector('[data-past-conversations-toggle="true"]');
+                if (btn) {
+                    btn.click();
+                    opened = true;
+                    await new Promise(r => setTimeout(r, 600));
+                    items = Array.from(document.querySelectorAll('div[id^="fastpick-item-"]'));
+                }
             }
 
-            // 2. Find matching element
-            const allElements = Array.from(document.querySelectorAll('*'));
-            const cleanTarget = targetTitle.trim().toLowerCase();
+            // If "Show more" is present, click it to get all
+            const showMore = document.querySelector('[id^="fastpick-show-more"]');
+            if (showMore) {
+                showMore.click();
+                await new Promise(r => setTimeout(r, 300));
+                items = Array.from(document.querySelectorAll('div[id^="fastpick-item-"]'));
+            }
 
-            const candidates = allElements.filter(el => {
-                if (el.offsetParent === null) return false;
-                const text = (el.innerText || el.textContent || '').trim().toLowerCase();
-                if (!text) return false;
-                return text === cleanTarget ||
-                       text.startsWith(cleanTarget.slice(0, 25)) ||
-                       cleanTarget.startsWith(text.slice(0, 25));
+            const chats = items.map(el => {
+                const id = el.id.replace("fastpick-item-", "");
+                const isSelected = el.getAttribute("aria-selected") === "true";
+                const lines = (el.innerText || "").split("\\n").map(l => l.trim()).filter(Boolean);
+                const title = lines[0] || "Untitled Conversation";
+                let date = "Recent";
+                let workspace = "";
+                if (lines.length >= 3) {
+                    workspace = lines[1];
+                    date = lines[2];
+                } else if (lines.length === 2) {
+                    date = lines[1];
+                }
+                return { id, title, workspace, date, isSelected };
             });
 
-            if (candidates.length === 0) {
-                return { error: 'Chat title not found in history: ' + targetTitle };
+            if (opened) {
+                window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", keyCode: 27 }));
             }
 
-            // Target the most specific element (deepest in tree)
-            let target = candidates[candidates.length - 1];
-            let clickable = target;
-            for (let i = 0; i < 5; i++) {
-                if (!clickable) break;
-                if (clickable.tagName === 'BUTTON' || clickable.tagName === 'A' ||
-                    clickable.getAttribute('role') === 'button' ||
-                    clickable.getAttribute('role') === 'option' ||
-                    clickable.classList.contains('monaco-list-row') ||
-                    (clickable.className && typeof clickable.className === 'string' && clickable.className.includes('cursor-pointer'))) {
-                    break;
-                }
-                clickable = clickable.parentElement;
-            }
-
-            (clickable || target).click();
-            await new Promise(r => setTimeout(r, 400));
-
-            return { success: true, method: 'clicked_item', title: targetTitle };
-        } catch (e) {
-            return { error: e.toString() };
+            return { success: true, count: chats.length, chats, opened };
+        } catch(e) {
+            return { success: false, error: e.toString(), chats: [] };
         }
     })()`;
 
     for (const ctx of cdp.contexts) {
         try {
-            const res = await cdp.call("Runtime.evaluate", {
-                expression: EXP,
-                returnByValue: true,
-                awaitPromise: true,
-                contextId: ctx.id
-            });
-            if (res.result?.value?.success) {
-                console.log(`[SELECT-CHAT] ✅ Selected "${chatTitle}" in context ${ctx.id}`);
-                cachedSnapshotCtxId = null;
-                cachedCascadeCtxId = null;
-                observerInjected = false;
+            const res = await Promise.race([
+                cdp.call("Runtime.evaluate", {
+                    expression: SCRAPE_EXP,
+                    returnByValue: true,
+                    awaitPromise: true,
+                    contextId: ctx.id
+                }),
+                new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 3500))
+            ]);
+            if (res.result?.value?.chats?.length > 0) {
+                try {
+                    await cdp.call("Input.dispatchKeyEvent", { type: "keyDown", key: "Escape", code: "Escape", keyCode: 27 });
+                    await cdp.call("Input.dispatchKeyEvent", { type: "keyUp", key: "Escape", code: "Escape", keyCode: 27 });
+                } catch (e) { }
                 return res.result.value;
             }
         } catch (e) { }
     }
-    return { error: 'Failed to select chat in any context' };
+
+    const localChats = getLocalBrainChats();
+    return { success: true, count: localChats.length, chats: localChats };
+}
+
+async function selectChat(cdp, { id, title } = {}) {
+    if (!cdp) return { error: "CDP disconnected" };
+    const safeId = JSON.stringify(id || "");
+    const safeTitle = JSON.stringify(title || "");
+
+    const EXP = `(async () => {
+        try {
+            const targetId = ${safeId};
+            const targetTitle = ${safeTitle};
+
+            let items = Array.from(document.querySelectorAll('div[id^="fastpick-item-"]'));
+            if (items.length === 0) {
+                const historyBtn = document.querySelector('a[data-tooltip-id="history-tooltip"]') ||
+                                 document.querySelector('[data-past-conversations-toggle="true"]');
+                if (historyBtn) {
+                    historyBtn.click();
+                    await new Promise(r => setTimeout(r, 600));
+                    items = Array.from(document.querySelectorAll('div[id^="fastpick-item-"]'));
+                }
+            }
+
+            let el = null;
+            if (targetId) {
+                el = document.getElementById("fastpick-item-" + targetId);
+            }
+            if (!el && targetTitle) {
+                const clean = targetTitle.toLowerCase().trim();
+                el = items.find(item => (item.innerText || "").toLowerCase().includes(clean));
+            }
+
+            if (!el) {
+                const showMore = document.querySelector('[id^="fastpick-show-more"]');
+                if (showMore) {
+                    showMore.click();
+                    await new Promise(r => setTimeout(r, 350));
+                    items = Array.from(document.querySelectorAll('div[id^="fastpick-item-"]'));
+                    if (targetId) el = document.getElementById("fastpick-item-" + targetId);
+                    if (!el && targetTitle) {
+                        const clean = targetTitle.toLowerCase().trim();
+                        el = items.find(item => (item.innerText || "").toLowerCase().includes(clean));
+                    }
+                }
+            }
+
+            if (!el) return { success: false, error: "Conversation not found in history list" };
+
+            el.click();
+            try {
+                el.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
+                el.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, cancelable: true, view: window }));
+                el.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, cancelable: true, view: window }));
+            } catch (e) {}
+
+            return { success: true, id: targetId, title: targetTitle };
+        } catch (e) {
+            return { success: false, error: e.toString() };
+        }
+    })()`;
+
+    for (const ctx of cdp.contexts) {
+        try {
+            const res = await Promise.race([
+                cdp.call("Runtime.evaluate", {
+                    expression: EXP,
+                    returnByValue: true,
+                    awaitPromise: true,
+                    contextId: ctx.id
+                }),
+                new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 4000))
+            ]);
+            if (res.result?.value?.success) {
+                console.log(`[SELECT-CHAT] ✅ Selected "${title || id}" in context ${ctx.id}`);
+                cachedSnapshotCtxId = null;
+                cachedCascadeCtxId = null;
+                lastSnapshot = null;
+                lastLightCheck = null;
+                observerInjected = false;
+                if (globalWss) {
+                    setTimeout(() => fetchAndBroadcastSnapshot(globalWss), 300);
+                    setTimeout(() => fetchAndBroadcastSnapshot(globalWss), 900);
+                }
+                return res.result.value;
+            }
+        } catch (e) { }
+    }
+    return { error: "Failed to select chat in any context" };
 }
 
 // Check if a chat is currently open (has cascade element)
@@ -1944,8 +1982,7 @@ async function startBackgroundLoop(wss) {
 
     healthCheck();
 
-    // --- Independent queue drain loop (5s) ---
-    // Separated from healthCheck so queued messages don't wait 30s
+    // --- Independent queue drain loop (2s) ---
     function startQueueDrainLoop() {
         setInterval(async () => {
             if (messageQueue.length === 0 || isProcessingQueue) return;
@@ -1953,32 +1990,50 @@ async function startBackgroundLoop(wss) {
 
             isProcessingQueue = true;
             try {
-                // Lightweight busy check (<1.5s) instead of full injectMessage (12s)
                 const busy = await isAgentBusy(cdpConnection);
                 if (busy) {
-                    // Still busy — drop stale messages (>5 min old)
-                    const age = Math.round((Date.now() - messageQueue[0].timestamp) / 1000);
-                    if (age > 300) {
-                        const dropped = messageQueue.shift();
-                        console.log(`🗑️ Dropped stale queued message (${age}s old): "${dropped.text.substring(0, 40)}..."`);
+                    const now = Date.now();
+                    const staleIdx = messageQueue.findIndex(m => (now - m.timestamp) > 900000);
+                    if (staleIdx !== -1) {
+                        const dropped = messageQueue.splice(staleIdx, 1)[0];
+                        console.log(`🗑️ Dropped stale queued message: "${dropped.text.substring(0, 40)}..."`);
+                        broadcastQueueUpdate(globalWss);
                     }
                     return;
                 }
-                // Agent is idle — send the queued message
-                const result = await injectMessage(cdpConnection, messageQueue[0].text);
+
+                const current = messageQueue[0];
+                console.log(`🚀 Queue: Sending message "${current.text.substring(0, 40)}..." (attempt ${(current.attempts || 0) + 1}/3)`);
+
+                const result = await injectMessage(cdpConnection, current.text);
                 if (result.reason === 'busy') {
-                    // Race condition: became busy between check and inject — leave in queue
                     return;
                 }
-                const sent = messageQueue.shift();
-                console.log(`✅ Queue: sent message "${sent.text.substring(0, 40)}..." (${messageQueue.length} remaining)`);
-                setTimeout(() => fetchAndBroadcastSnapshot(wss), 1000);
+
+                if (result.ok !== false) {
+                    messageQueue.shift();
+                    console.log(`✅ Queue: Sent message successfully! (${messageQueue.length} remaining)`);
+                    broadcastQueueUpdate(globalWss);
+                    if (globalWss) {
+                        setTimeout(() => fetchAndBroadcastSnapshot(globalWss), 300);
+                        setTimeout(() => fetchAndBroadcastSnapshot(globalWss), 1200);
+                        setTimeout(() => fetchAndBroadcastSnapshot(globalWss), 2500);
+                    }
+                } else {
+                    current.attempts = (current.attempts || 0) + 1;
+                    console.warn(`⚠️ Queue: Injection attempt ${current.attempts}/5 failed: ${result.error || 'unknown'}`);
+                    if (current.attempts >= 5) {
+                        messageQueue.shift();
+                        console.error(`❌ Queue: Message dropped after 5 failed attempts: "${current.text.substring(0, 40)}..."`);
+                        broadcastQueueUpdate(globalWss);
+                    }
+                }
             } catch (e) {
                 console.error('Queue drain error:', e.message);
             } finally {
-                isProcessingQueue = false; // Always reset — never gets stuck
+                isProcessingQueue = false;
             }
-        }, 5000); // Check every 5 seconds
+        }, 1200);
     }
 
     startQueueDrainLoop();
@@ -2172,70 +2227,59 @@ async function createServer() {
     });
 
     // Upload Image (attach picture to IDE chat)
+    // Upload Image (attach picture to IDE chat)
     app.post('/upload-image', async (req, res) => {
         const { name, dataUrl } = req.body;
         if (!dataUrl) return res.status(400).json({ error: 'No image data' });
-        if (!cdpConnection && !(await ensureCDP())) return res.status(503).json({ error: 'CDP disconnected' });
 
         try {
             // Decode base64 and save to temp file
             const matches = dataUrl.match(/^data:(.+);base64,(.+)$/);
             if (!matches) return res.status(400).json({ error: 'Invalid data URL' });
 
-            const ext = matches[1].split('/')[1] || 'png';
+            const ext = (matches[1].split('/')[1] || 'png').split(';')[0].replace('+xml', '');
             const buffer = Buffer.from(matches[2], 'base64');
             const tmpPath = join(os.tmpdir(), `antigravity_upload_${Date.now()}.${ext}`);
             fs.writeFileSync(tmpPath, buffer);
 
             console.log(`[UPLOAD] Saved image to ${tmpPath} (${buffer.length} bytes)`);
 
-            // Use CDP to inject the file into the IDE's file input
-            // First, find the file input in the IDE
-            const contexts = cdpConnection.contexts || [];
+            // Use CDP if available to also inject into IDE file input if present
             let uploaded = false;
-
-            for (const ctx of contexts) {
-                try {
-                    // Find file input element
-                    const evalRes = await cdpConnection.call('Runtime.evaluate', {
-                        expression: 'document.querySelector("input[type=file]")',
-                        contextId: ctx.id
-                    });
-
-                    if (evalRes.result && evalRes.result.objectId && evalRes.result.subtype !== 'null') {
-                        // Get nodeId from the object
-                        const nodeRes = await cdpConnection.call('DOM.requestNode', {
-                            objectId: evalRes.result.objectId
+            if (cdpConnection || (await ensureCDP())) {
+                const contexts = cdpConnection ? (cdpConnection.contexts || []) : [];
+                for (const ctx of contexts) {
+                    try {
+                        const evalRes = await cdpConnection.call('Runtime.evaluate', {
+                            expression: 'document.querySelector("input[type=file]")',
+                            contextId: ctx.id
                         });
 
-                        // Set the file
-                        await cdpConnection.call('DOM.setFileInputFiles', {
-                            nodeId: nodeRes.nodeId,
-                            files: [tmpPath]
-                        });
+                        if (evalRes.result && evalRes.result.objectId && evalRes.result.subtype !== 'null') {
+                            const nodeRes = await cdpConnection.call('DOM.requestNode', {
+                                objectId: evalRes.result.objectId
+                            });
 
-                        console.log(`[UPLOAD] Injected file into IDE context ${ctx.id}`);
-                        uploaded = true;
-                        break;
-                    }
-                } catch (ctxErr) {
-                    // Context might not have DOM access
+                            await cdpConnection.call('DOM.setFileInputFiles', {
+                                nodeId: nodeRes.nodeId,
+                                files: [tmpPath]
+                            });
+
+                            console.log(`[UPLOAD] Injected file into IDE context ${ctx.id}`);
+                            uploaded = true;
+                            break;
+                        }
+                    } catch (ctxErr) {}
                 }
             }
 
-            if (uploaded) {
-                res.json({ success: true, path: tmpPath });
-            } else {
-                // File saved but couldn't find IDE input - still useful
-                res.json({ success: true, path: tmpPath, note: 'File saved but no file input found in IDE' });
-            }
+            res.json({ success: true, path: tmpPath, uploadedToIde: uploaded });
         } catch (e) {
             console.error('[UPLOAD] Error:', e);
             res.status(500).json({ error: e.message });
         }
     });
 
-    // Stop Generation
     app.post('/stop', async (req, res) => {
         if (!cdpConnection && !(await ensureCDP())) return res.status(503).json({ error: 'CDP disconnected' });
         const result = await stopGeneration(cdpConnection);
@@ -2252,6 +2296,10 @@ async function createServer() {
             }
             const endpoint = await discoverCDP();
             cdpConnection = await connectCDP(endpoint.url);
+            if (globalWss) {
+                wirePushHandler(globalWss);
+                injectObserver(cdpConnection).catch(() => {});
+            }
             console.log("  ✅ Reconnected to CDP on port", endpoint.port);
             res.json({ success: true, message: "CDP reconnected", port: endpoint.port });
         } catch (e) {
@@ -2341,7 +2389,7 @@ async function createServer() {
 
     // Send message
     app.post('/send', async (req, res) => {
-        const { message } = req.body;
+        const { message, forceQueue, forceSend } = req.body;
 
         if (!message) {
             return res.status(400).json({ error: 'Message required' });
@@ -2351,46 +2399,138 @@ async function createServer() {
             return res.status(503).json({ error: 'CDP not connected' });
         }
 
-        // Timeout the inject so the /send endpoint never hangs
-        const result = await Promise.race([
-            injectMessage(cdpConnection, message),
-            new Promise(resolve => setTimeout(() => resolve({ ok: false, reason: 'endpoint_timeout' }), 10000))
-        ]);
-
-        // If agent is busy (terminal running), queue the message instead of dropping it
-        if (result.reason === 'busy') {
+        if (forceQueue) {
             if (messageQueue.length >= MAX_QUEUED_MESSAGES) {
                 return res.json({
                     success: false,
                     queued: false,
                     reason: 'queue_full',
                     queueSize: messageQueue.length,
-                    details: { error: 'Message queue full (max ' + MAX_QUEUED_MESSAGES + '). Agent is busy.' }
+                    details: { error: 'Message queue full (max ' + MAX_QUEUED_MESSAGES + ').' }
                 });
             }
-            messageQueue.push({ text: message, timestamp: Date.now() });
-            console.log(`📋 Message queued (${messageQueue.length}/${MAX_QUEUED_MESSAGES}): "${message.substring(0, 50)}..."`);
+            const item = {
+                id: 'msg_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7),
+                text: message,
+                timestamp: Date.now(),
+                attempts: 0
+            };
+            messageQueue.push(item);
+            console.log(`📋 Message force-queued (${messageQueue.length}/${MAX_QUEUED_MESSAGES}): "${message.substring(0, 50)}..."`);
+            broadcastQueueUpdate(globalWss);
             return res.json({
                 success: true,
                 queued: true,
                 queuePosition: messageQueue.length,
-                details: { reason: 'Agent busy — message queued for auto-send when idle' }
+                id: item.id,
+                details: { reason: 'Message queued for auto-send' }
             });
         }
 
-        // Always return 200 - the message usually goes through even if CDP reports issues
-        // The client will refresh and see if the message appeared
+        // Attempt direct injection first (works for both active send and IDE native queueing)
+        const result = await Promise.race([
+            injectMessage(cdpConnection, message),
+            new Promise(resolve => setTimeout(() => resolve({ ok: false, reason: 'endpoint_timeout' }), 10000))
+        ]);
+
+        if (result.ok === false && (result.reason === 'busy' || result.reason === 'endpoint_timeout')) {
+            if (messageQueue.length >= MAX_QUEUED_MESSAGES) {
+                return res.json({
+                    success: false,
+                    queued: false,
+                    reason: 'queue_full',
+                    queueSize: messageQueue.length,
+                    details: { error: 'Message queue full (max ' + MAX_QUEUED_MESSAGES + ').' }
+                });
+            }
+            const item = {
+                id: 'msg_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7),
+                text: message,
+                timestamp: Date.now(),
+                attempts: 0
+            };
+            messageQueue.push(item);
+            console.log(`📋 Message queued in fallback (${messageQueue.length}/${MAX_QUEUED_MESSAGES}): "${message.substring(0, 50)}..."`);
+            broadcastQueueUpdate(globalWss);
+            return res.json({
+                success: true,
+                queued: true,
+                queuePosition: messageQueue.length,
+                id: item.id,
+                details: { reason: 'Agent busy — message queued for auto-send when ready' }
+            });
+        }
+
         res.json({
             success: result.ok !== false,
+            queued: false,
             method: result.method || 'attempted',
             details: result
         });
 
         if (result.ok !== false && globalWss) {
-            setTimeout(() => fetchAndBroadcastSnapshot(globalWss), 400);
-            setTimeout(() => fetchAndBroadcastSnapshot(globalWss), 1500);
-            setTimeout(() => fetchAndBroadcastSnapshot(globalWss), 3000);
+            setTimeout(() => fetchAndBroadcastSnapshot(globalWss), 300);
+            setTimeout(() => fetchAndBroadcastSnapshot(globalWss), 1200);
+            setTimeout(() => fetchAndBroadcastSnapshot(globalWss), 2500);
         }
+    });
+
+    // Queue APIs
+    app.get('/api/queue', async (req, res) => {
+        let busy = false;
+        try {
+            if (cdpConnection) busy = await isAgentBusy(cdpConnection);
+        } catch (e) { }
+        res.json({
+            count: messageQueue.length,
+            max: MAX_QUEUED_MESSAGES,
+            isAgentBusy: busy,
+            items: messageQueue.map(m => ({
+                id: m.id,
+                text: m.text,
+                timestamp: m.timestamp,
+                attempts: m.attempts || 0
+            }))
+        });
+    });
+
+    app.post('/api/queue/clear', (req, res) => {
+        const count = messageQueue.length;
+        messageQueue.length = 0;
+        console.log(`🗑️ Manually cleared queue (${count} messages)`);
+        broadcastQueueUpdate(globalWss);
+        res.json({ success: true, cleared: count });
+    });
+
+    app.post('/api/queue/send-now', async (req, res) => {
+        if (messageQueue.length === 0) {
+            return res.json({ success: false, error: 'Queue is empty' });
+        }
+        if (!cdpConnection && !(await ensureCDP())) {
+            return res.status(503).json({ error: 'CDP not connected' });
+        }
+        const item = messageQueue[0];
+        const result = await injectMessage(cdpConnection, item.text);
+        if (result.ok !== false) {
+            messageQueue.shift();
+            broadcastQueueUpdate(globalWss);
+            if (globalWss) {
+                setTimeout(() => fetchAndBroadcastSnapshot(globalWss), 400);
+            }
+            return res.json({ success: true, message: 'Message sent', remaining: messageQueue.length });
+        }
+        res.json({ success: false, error: result.error || result.reason || 'Send failed' });
+    });
+
+    app.post('/api/queue/remove', (req, res) => {
+        const { id } = req.body;
+        const idx = messageQueue.findIndex(m => m.id === id);
+        if (idx !== -1) {
+            const removed = messageQueue.splice(idx, 1)[0];
+            broadcastQueueUpdate(globalWss);
+            return res.json({ success: true, removed });
+        }
+        res.status(404).json({ error: 'Message not found in queue' });
     });
 
     // UI Inspection endpoint - Returns all buttons as JSON for debugging
@@ -2767,10 +2907,10 @@ async function main() {
 
         // Select a Chat
         app.post('/select-chat', async (req, res) => {
-            const { title } = req.body;
-            if (!title) return res.status(400).json({ error: 'Chat title required' });
-            if (!cdpConnection && !(await ensureCDP())) return res.status(503).json({ error: 'CDP disconnected' });
-            const result = await selectChat(cdpConnection, title);
+            const { id, title } = req.body;
+            if (!id && !title) return res.status(400).json({ error: "Chat id or title required" });
+            if (!cdpConnection && !(await ensureCDP())) return res.status(503).json({ error: "CDP disconnected" });
+            const result = await selectChat(cdpConnection, { id, title });
             res.json(result);
         });
 

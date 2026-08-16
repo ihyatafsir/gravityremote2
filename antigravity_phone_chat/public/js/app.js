@@ -3,11 +3,18 @@ const chatContainer = document.getElementById('chatContainer');
 const chatContent = document.getElementById('chatContent');
 const messageInput = document.getElementById('messageInput');
 const sendBtn = document.getElementById('sendBtn');
+const queueBtn = document.getElementById('queueBtn');
 const scrollToBottomBtn = document.getElementById('scrollToBottom');
 const statusDot = document.getElementById('statusDot');
 const statusText = document.getElementById('statusText');
 const refreshBtn = document.getElementById('refreshBtn');
 const stopBtn = document.getElementById('stopBtn');
+const stopBarBtn = document.getElementById('stopBarBtn');
+const queueTray = document.getElementById('queueTray');
+const queueBadge = document.getElementById('queueBadge');
+const queuePreview = document.getElementById('queuePreview');
+const queueSendNowBtn = document.getElementById('queueSendNowBtn');
+const queueClearBtn = document.getElementById('queueClearBtn');
 const newChatBtn = document.getElementById('newChatBtn');
 const historyBtn = document.getElementById('historyBtn');
 
@@ -152,6 +159,91 @@ const MODELS = [
     "DeepSeek R1 (Reasoning) ⚡"
 ];
 
+
+// --- Message Queue & Agent State UI ---
+let currentQueueItems = [];
+
+async function refreshQueueStatus() {
+    try {
+        const res = await fetchWithAuth('/api/queue');
+        if (res.ok) {
+            const data = await res.json();
+            updateQueueUI(data.items || []);
+            if (data.isAgentBusy !== undefined) {
+                updateAgentBusyState(data.isAgentBusy);
+            }
+        }
+    } catch (e) { }
+}
+
+function updateQueueUI(items) {
+    currentQueueItems = items || [];
+    if (!queueTray) return;
+
+    if (currentQueueItems.length > 0) {
+        queueTray.style.display = 'flex';
+        if (queueBadge) queueBadge.textContent = `${currentQueueItems.length} Queued`;
+        const first = currentQueueItems[0];
+        const previewText = first.text.length > 35 ? first.text.substring(0, 35) + '...' : first.text;
+        if (queuePreview) queuePreview.textContent = `Next: "${previewText}"`;
+    } else {
+        queueTray.style.display = 'none';
+    }
+}
+
+function updateAgentBusyState(isBusy) {
+    if (stopBtn) {
+        if (isBusy) {
+            stopBtn.classList.add('is-active');
+            stopBtn.title = 'Stop active agent execution (Ctrl+D)';
+        } else {
+            stopBtn.classList.remove('is-active');
+            stopBtn.title = 'Stop agent execution';
+        }
+    }
+    if (stopBarBtn) {
+        stopBarBtn.style.display = isBusy ? 'flex' : 'none';
+    }
+}
+
+if (queueSendNowBtn) {
+    queueSendNowBtn.addEventListener('click', async () => {
+        queueSendNowBtn.disabled = true;
+        showToast('⚡ Force-sending next queued message...');
+        try {
+            const res = await fetchWithAuth('/api/queue/send-now', { method: 'POST' });
+            const data = await res.json();
+            if (data.success) {
+                showToast('🚀 Message sent to agent!');
+                setTimeout(loadSnapshot, 300);
+            } else {
+                showToast('Send failed: ' + (data.error || 'Unknown error'));
+            }
+        } catch (e) {
+            showToast('Error: ' + e.message);
+        } finally {
+            queueSendNowBtn.disabled = false;
+            refreshQueueStatus();
+        }
+    });
+}
+
+if (queueClearBtn) {
+    queueClearBtn.addEventListener('click', async () => {
+        queueClearBtn.disabled = true;
+        try {
+            const res = await fetchWithAuth('/api/queue/clear', { method: 'POST' });
+            const data = await res.json();
+            showToast(`🗑️ Cleared ${data.cleared || 0} queued message(s)`);
+            updateQueueUI([]);
+        } catch (e) {
+            showToast('Clear failed: ' + e.message);
+        } finally {
+            queueClearBtn.disabled = false;
+        }
+    });
+}
+
 // --- WebSocket ---
 function connectWebSocket() {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -168,6 +260,8 @@ function connectWebSocket() {
             const data = JSON.parse(event.data);
             if (data.type === 'snapshot_update' && autoRefreshEnabled && !userIsScrolling) {
                 loadSnapshot();
+            } else if (data.type === 'queue_update') {
+                updateQueueUI(data.items || []);
             }
         } catch (e) { }
     };
@@ -209,6 +303,14 @@ async function loadSnapshot() {
 
         chatIsOpen = true;
         const data = await response.json();
+        if (data.isAgentBusy !== undefined) {
+            updateAgentBusyState(data.isAgentBusy);
+        } else if (data.html) {
+            const isBusy = data.html.includes('input-send-button-cancel-tooltip') ||
+                           data.html.includes('lucide-square') ||
+                           data.html.includes('bg-red-500');
+            updateAgentBusyState(isBusy);
+        }
 
         // Capture scroll state BEFORE updating content
         const scrollPos = chatContainer.scrollTop;
@@ -497,20 +599,55 @@ const attachBtn = document.getElementById('attachBtn');
 const attachPreview = document.getElementById('attachPreview');
 const attachPreviewInner = document.getElementById('attachPreviewInner');
 
+function addImageFile(file) {
+    if (!file || !file.type.startsWith('image/')) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+        attachedImages.push({ file, dataUrl: ev.target.result });
+        renderAttachPreview();
+    };
+    reader.readAsDataURL(file);
+}
+
 if (attachBtn && fileInput) {
     attachBtn.addEventListener('click', () => fileInput.click());
-    fileInput.addEventListener('change', async (e) => {
+    fileInput.addEventListener('change', (e) => {
         const files = Array.from(e.target.files);
         for (const file of files) {
-            if (!file.type.startsWith('image/')) continue;
-            const reader = new FileReader();
-            reader.onload = (ev) => {
-                attachedImages.push({ file, dataUrl: ev.target.result });
-                renderAttachPreview();
-            };
-            reader.readAsDataURL(file);
+            addImageFile(file);
         }
         fileInput.value = '';
+    });
+}
+
+// Support pasting images directly from clipboard (Ctrl+V / long press)
+if (messageInput) {
+    messageInput.addEventListener('input', () => {
+        messageInput.style.height = 'auto';
+        messageInput.style.height = Math.min(messageInput.scrollHeight, 140) + 'px';
+    });
+
+    messageInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            sendMessage({ forceSend: false });
+        }
+    });
+
+    messageInput.addEventListener('paste', (e) => {
+        const items = (e.clipboardData || window.clipboardData)?.items;
+        if (items) {
+            for (const item of items) {
+                if (item.type && item.type.startsWith('image/')) {
+                    const file = item.getAsFile();
+                    if (file) {
+                        addImageFile(file);
+                        showToast('📎 Image pasted from clipboard');
+                        e.preventDefault();
+                    }
+                }
+            }
+        }
     });
 }
 
@@ -535,47 +672,73 @@ window.removeAttachedImage = function (idx) {
     renderAttachPreview();
 };
 
-// --- Send Message ---
-async function sendMessage() {
+// --- Send Message (Supports direct send, queue, and force-send) ---
+async function sendMessage({ forceQueue = false, forceSend = false } = {}) {
     const text = messageInput.value.trim();
     if (!text && attachedImages.length === 0) return;
 
-    sendBtn.disabled = true;
+    if (sendBtn) sendBtn.disabled = true;
+    if (queueBtn) queueBtn.disabled = true;
     messageInput.disabled = true;
 
     try {
+        const uploadedPaths = [];
         // Upload images first if any
-        for (const img of attachedImages) {
-            try {
-                const res = await fetchWithAuth('/upload-image', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        name: img.file ? img.file.name : 'image.png',
-                        dataUrl: img.dataUrl
-                    })
-                });
-                const uData = await res.json();
-                if (uData.error) {
-                    console.warn('Image upload error:', uData.error);
-                    showToast('Image upload: ' + uData.error);
+        if (attachedImages.length > 0) {
+            showToast(`Uploading ${attachedImages.length} image(s)...`);
+            for (const img of attachedImages) {
+                try {
+                    const res = await fetchWithAuth('/upload-image', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            name: img.file ? img.file.name : 'image.png',
+                            dataUrl: img.dataUrl
+                        })
+                    });
+                    const uData = await res.json();
+                    if (uData.path) {
+                        uploadedPaths.push(uData.path);
+                    } else if (uData.error) {
+                        console.warn('Image upload error:', uData.error);
+                        showToast('Image upload: ' + uData.error);
+                    }
+                } catch (imgErr) {
+                    console.error('Failed to upload image:', imgErr);
                 }
-            } catch (imgErr) {
-                console.error('Failed to upload image:', imgErr);
+            }
+            attachedImages = [];
+            renderAttachPreview();
+        }
+
+        let messageToSend = text;
+        if (uploadedPaths.length > 0) {
+            const fileRefs = uploadedPaths.map(p => `[Uploaded Image/Screenshot: ${p}]`).join('\n');
+            if (messageToSend) {
+                messageToSend = `${messageToSend}\n\n${fileRefs}`;
+            } else {
+                messageToSend = `I have uploaded the following screenshot(s)/image(s):\n${fileRefs}\nPlease inspect them and assist me.`;
             }
         }
-        attachedImages = [];
-        renderAttachPreview();
 
-        if (text) {
+        if (messageToSend) {
             const res = await fetchWithAuth('/send', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ message: text })
+                body: JSON.stringify({
+                    message: messageToSend,
+                    forceQueue: forceQueue,
+                    forceSend: forceSend
+                })
             });
             const data = await res.json();
-            if (data.error) {
+            if (data.queued) {
+                showToast(`📋 Message added to queue (#${data.queuePosition || 1}) — auto-sends when idle`);
+                refreshQueueStatus();
+            } else if (data.error) {
                 showToast('Error: ' + data.error);
+            } else {
+                showToast('✅ Prompt sent to agent');
             }
         }
 
@@ -586,13 +749,15 @@ async function sendMessage() {
     } catch (e) {
         showToast('Failed to send: ' + e.message);
     } finally {
-        sendBtn.disabled = false;
+        if (sendBtn) sendBtn.disabled = false;
+        if (queueBtn) queueBtn.disabled = false;
         messageInput.disabled = false;
         messageInput.focus();
     }
 }
 
-if (sendBtn) sendBtn.addEventListener('click', sendMessage);
+if (sendBtn) sendBtn.addEventListener('click', () => sendMessage({ forceSend: false }));
+if (queueBtn) queueBtn.addEventListener('click', () => sendMessage({ forceQueue: true }));
 
 // --- New Chat Logic ---
 async function startNewChat() {
@@ -632,14 +797,22 @@ async function startNewChat() {
     }
 }
 
-function startNewChatFromHistory() {
-    hideChatHistory();
-    startNewChat();
-}
+
 
 if (newChatBtn) newChatBtn.addEventListener('click', startNewChat);
 
+function startNewChatFromHistory() { hideChatHistory(); startNewChat(); }
+function hideChatHistory() { if (historyLayer) historyLayer.classList.remove('show'); }
+
 // --- Chat History Logic ---
+if (historyBtn) historyBtn.addEventListener("click", showChatHistory);
+window.showChatHistory = showChatHistory;
+window.hideChatHistory = hideChatHistory;
+window.startNewChatFromHistory = startNewChatFromHistory;
+window.selectChat = selectChat;
+window.refreshChatHistory = refreshChatHistory;
+window.clearHistorySearch = clearHistorySearch;
+
 async function showChatHistory() {
     historyLayer.classList.add('show');
     if (historySearchInput) {
@@ -712,53 +885,44 @@ function updateConversationBadges(count) {
     }
 }
 
-function renderHistoryList(chats, filterText = '') {
+function renderHistoryList(chats, filterText) {
+    filterText = filterText || "";
     const query = filterText.trim().toLowerCase();
     const filtered = query
-        ? chats.filter(c => (c.title || c.name || '').toLowerCase().includes(query))
+        ? chats.filter(function(c) { return ((c.title || "") + " " + (c.workspace || "")).toLowerCase().includes(query); })
         : chats;
 
-    let html = `
-        <div class="new-chat-card-pinned" onclick="startNewChatFromHistory()">
-            <span>＋ Start New Conversation</span>
-        </div>
-    `;
+    let html = '<div class="new-chat-card-pinned" onclick="startNewChatFromHistory()"><span>＋ Start New Conversation</span></div>';
 
     if (filtered.length === 0) {
-        html += `
-            <div style="padding: 30px 16px; text-align: center; color: var(--text-muted);">
-                <div style="font-size: 20px; margin-bottom: 6px;">🔍</div>
-                <div style="font-size: 13px;">No conversations matching "${escapeHtml(filterText)}"</div>
-            </div>
-        `;
+        html += '<div style="padding: 30px 16px; text-align: center; color: var(--text-muted);"><div style="font-size: 20px; margin-bottom: 6px;">🔍</div><div style="font-size: 13px;">No conversations matching "' + escapeHtml(filterText) + '"</div></div>';
         historyList.innerHTML = html;
         return;
     }
 
-    filtered.forEach(chat => {
-        const title = chat.title || chat.name || 'Untitled';
-        const escapedTitle = title.replace(/'/g, "\\'").replace(/"/g, '&quot;');
-        const isActive = currentChatTitle && (
+    filtered.forEach(function(chat) {
+        const title = chat.title || chat.name || "Untitled";
+        const id = chat.id || "";
+        const escapedTitle = title.replace(/'/g, "\\x27").replace(/"/g, "&quot;");
+        const escapedId = id.replace(/'/g, "\\x27").replace(/"/g, "&quot;");
+        const isActive = chat.isSelected || (currentChatTitle && (
             currentChatTitle.toLowerCase() === title.toLowerCase() ||
             title.toLowerCase().startsWith(currentChatTitle.toLowerCase().slice(0, 15))
-        );
+        ));
 
-        html += `
-            <div class="history-item ${isActive ? 'active-chat-item' : ''}" onclick="selectChat('${escapedTitle}', this)">
-                <div class="history-item-icon">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
-                    </svg>
-                </div>
-                <div class="history-item-text">
-                    <div class="history-item-title">${escapeHtml(title)}</div>
-                    <div class="history-item-date">
-                        ${isActive ? '<span class="active-pill-indicator">Active</span>' : ''}
-                        <span>${escapeHtml(chat.date || 'Recent')}</span>
-                    </div>
-                </div>
-            </div>
-        `;
+        const activeTag = isActive ? '<span class="active-pill-indicator">Active</span>' : "";
+        const wsTag = chat.workspace ? '<span class="workspace-pill-tag">' + escapeHtml(chat.workspace) + '</span>' : "";
+        const dateTag = '<span>' + escapeHtml(chat.date || "Recent") + '</span>';
+
+        html += '<div class="history-item ' + (isActive ? "active-chat-item" : "") + '" onclick="selectChat(\'' + escapedId + '\', \'' + escapedTitle + '\', this)">' +
+            '<div class="history-item-icon">' +
+                '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>' +
+            '</div>' +
+            '<div class="history-item-text">' +
+                '<div class="history-item-title">' + escapeHtml(title) + '</div>' +
+                '<div class="history-item-date">' + activeTag + wsTag + dateTag + '</div>' +
+            '</div>' +
+        '</div>';
     });
 
     historyList.innerHTML = html;
@@ -766,60 +930,53 @@ function renderHistoryList(chats, filterText = '') {
 
 // History Search Input
 if (historySearchInput) {
-    historySearchInput.addEventListener('input', (e) => {
+    historySearchInput.addEventListener("input", function(e) {
         const val = e.target.value;
-        if (clearSearchBtn) clearSearchBtn.style.display = val ? 'block' : 'none';
+        if (clearSearchBtn) clearSearchBtn.style.display = val ? "block" : "none";
         renderHistoryList(cachedConversations, val);
     });
 }
 
 function clearHistorySearch() {
-    if (historySearchInput) historySearchInput.value = '';
-    if (clearSearchBtn) clearSearchBtn.style.display = 'none';
-    renderHistoryList(cachedConversations, '');
+    if (historySearchInput) historySearchInput.value = "";
+    if (clearSearchBtn) clearSearchBtn.style.display = "none";
+    renderHistoryList(cachedConversations);
 }
 
-function hideChatHistory() {
-    historyLayer.classList.remove('show');
-}
 
-if (historyBtn) historyBtn.addEventListener('click', showChatHistory);
 
-// --- Select Chat from History ---
-async function selectChat(title, element) {
+
+
+async function selectChat(id, title, element) {
     if (element) {
-        element.style.opacity = '0.6';
-        element.querySelector('.history-item-icon').innerHTML = '<div class="loading-spinner" style="width:16px;height:16px;border-width:2px;"></div>';
+        element.style.opacity = "0.6";
+        const icon = element.querySelector(".history-item-icon");
+        if (icon) icon.innerHTML = '<div class="loading-spinner" style="width:16px;height:16px;border-width:2px;"></div>';
     }
 
     currentChatTitle = title;
     if (activeChatTitle) activeChatTitle.textContent = title;
 
     try {
-        const res = await fetchWithAuth('/select-chat', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ title })
+        const res = await fetchWithAuth("/select-chat", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ id: id, title: title })
         });
         const data = await res.json();
 
         if (data.success) {
             hideChatHistory();
-            showToast(`Switched to: ${title}`);
-            chatContent.innerHTML = `
-                <div class="loading-state">
-                    <div class="loading-spinner"></div>
-                    <p>Loading ${escapeHtml(title)}...</p>
-                </div>
-            `;
+            showToast("Switched to: " + title);
+            chatContent.innerHTML = '<div class="loading-state"><div class="loading-spinner"></div><p>Loading ' + escapeHtml(title) + '...</p></div>';
             setTimeout(loadSnapshot, 300);
             setTimeout(loadSnapshot, 800);
             setTimeout(loadSnapshot, 1500);
         } else {
-            showToast('Could not switch: ' + (data.error || 'Unknown error'));
+            showToast("Could not switch: " + (data.error || "Unknown error"));
         }
     } catch (e) {
-        showToast('Select chat error: ' + e.message);
+        showToast("Select chat error: " + e.message);
     }
 }
 
@@ -942,203 +1099,47 @@ function quickAction(text) {
 }
 
 // --- Stop Button Logic ---
-if (stopBtn) {
-    stopBtn.addEventListener('click', async () => {
+async function handleStopAction() {
+    if (stopBtn) {
         stopBtn.style.opacity = '0.5';
-        showToast('■ Stopping generation...');
-        try {
-            const res = await fetchWithAuth('/stop', { method: 'POST' });
-            const data = await res.json();
-            if (data.success) {
-                showToast('Agent stopped');
-            }
-        } catch (e) { }
-        setTimeout(() => { stopBtn.style.opacity = '1'; }, 500);
-    });
-}
-
-// --- Keyboard input auto-resize & submit ---
-if (messageInput) {
-    messageInput.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter' && !e.shiftKey) {
-            e.preventDefault();
-            sendMessage();
-        }
-    });
-
-    messageInput.addEventListener('input', function () {
-        this.style.height = 'auto';
-        this.style.height = (this.scrollHeight) + 'px';
-    });
-}
-
-// --- Scroll Handling ---
-if (chatContainer) {
-    chatContainer.addEventListener('scroll', () => {
-        userIsScrolling = true;
-        userScrollLockUntil = Date.now() + USER_SCROLL_LOCK_DURATION;
-        clearTimeout(idleTimer);
-
-        const isNearBottom = chatContainer.scrollHeight - chatContainer.scrollTop - chatContainer.clientHeight < 120;
-        if (isNearBottom) {
-            if (scrollToBottomBtn) scrollToBottomBtn.classList.remove('show');
-            userScrollLockUntil = 0;
+        stopBtn.disabled = true;
+    }
+    if (stopBarBtn) {
+        stopBarBtn.style.opacity = '0.5';
+        stopBarBtn.disabled = true;
+    }
+    showToast('■ Stopping generation and clearing queue...');
+    try {
+        const res = await fetchWithAuth('/stop', { method: 'POST' });
+        const data = await res.json();
+        if (data.success) {
+            const queueMsg = data.clearedQueue ? ` (${data.clearedQueue} queued msg cleared)` : '';
+            showToast(`■ Agent stopped${queueMsg}`);
+            updateQueueUI([]);
+            updateAgentBusyState(false);
+            setTimeout(loadSnapshot, 300);
+            setTimeout(loadSnapshot, 1000);
         } else {
-            if (scrollToBottomBtn) scrollToBottomBtn.classList.add('show');
+            showToast('Stop: ' + (data.error || 'No active generation found'));
         }
-
-        idleTimer = setTimeout(() => {
-            userIsScrolling = false;
-            autoRefreshEnabled = true;
-        }, 5000);
-    });
-}
-
-if (scrollToBottomBtn) {
-    scrollToBottomBtn.addEventListener('click', () => {
-        userIsScrolling = false;
-        userScrollLockUntil = 0;
-        scrollToBottom();
-    });
-}
-
-// --- Settings Modal ---
-function openModal(title, options, onSelect) {
-    modalTitle.textContent = title;
-    modalList.innerHTML = '';
-    options.forEach(opt => {
-        const div = document.createElement('div');
-        div.className = 'modal-option';
-        div.textContent = opt;
-        div.onclick = () => {
-            onSelect(opt);
-            closeModal();
-        };
-        modalList.appendChild(div);
-    });
-    modalOverlay.classList.add('show');
-}
-
-function closeModal() {
-    modalOverlay.classList.remove('show');
-}
-
-if (modalOverlay) {
-    modalOverlay.onclick = (e) => {
-        if (e.target === modalOverlay) closeModal();
-    };
-}
-
-if (modeBtn) {
-    modeBtn.addEventListener('click', () => {
-        openModal('Select Mode', ['Fast', 'Planning'], async (mode) => {
-            modeText.textContent = 'Setting...';
-            try {
-                const res = await fetchWithAuth('/set-mode', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ mode })
-                });
-                const data = await res.json();
-                if (data.success) {
-                    currentMode = mode;
-                    modeText.textContent = mode;
-                    modeBtn.classList.toggle('active', mode === 'Planning');
-                } else {
-                    modeText.textContent = currentMode;
-                }
-            } catch (e) {
-                modeText.textContent = currentMode;
+    } catch (e) {
+        showToast('Failed to stop: ' + e.message);
+    } finally {
+        setTimeout(() => {
+            if (stopBtn) {
+                stopBtn.style.opacity = '1';
+                stopBtn.disabled = false;
             }
-        });
-    });
-}
-
-if (modelBtn) {
-    modelBtn.addEventListener('click', () => {
-        openModal('Select Model', MODELS, async (model) => {
-            const prev = modelText.textContent;
-            modelText.textContent = 'Setting...';
-            try {
-                const res = await fetchWithAuth('/set-model', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ model })
-                });
-                const data = await res.json();
-                if (data.success) {
-                    modelText.textContent = model;
-                } else {
-                    modelText.textContent = prev;
-                }
-            } catch (e) {
-                modelText.textContent = prev;
+            if (stopBarBtn) {
+                stopBarBtn.style.opacity = '1';
+                stopBarBtn.disabled = false;
             }
-        });
-    });
+        }, 400);
+    }
 }
 
-// --- Viewport / Keyboard Handling ---
-if (window.visualViewport) {
-    function handleResize() {
-        document.body.style.height = window.visualViewport.height + 'px';
-        if (document.activeElement === messageInput) {
-            setTimeout(scrollToBottom, 100);
-        }
-    }
-    window.visualViewport.addEventListener('resize', handleResize);
-    window.visualViewport.addEventListener('scroll', handleResize);
-    handleResize();
-}
-
-// --- Remote Click Logic (Thinking/Thought + Action Buttons) ---
-chatContainer.addEventListener('click', async (e) => {
-    const actionBtn = e.target.closest('button, [role="button"]');
-    if (actionBtn) {
-        const btnText = (actionBtn.innerText || actionBtn.textContent || '').trim();
-        const isActionButton = /^(Run|Accept|Allow|Approve|Yes|OK|Confirm|Save|Apply|Execute|Continue|Proceed|Deny|Reject|Cancel)$/i.test(btnText) ||
-            /^(Run Command|Accept All|Allow All|Allow Once|Accept Changes|Approve All)$/i.test(btnText);
-
-        if (isActionButton) {
-            actionBtn.style.opacity = '0.5';
-            setTimeout(() => { actionBtn.style.opacity = '1'; }, 400);
-
-            try {
-                await fetchWithAuth('/approve-action', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ buttonText: btnText })
-                });
-                setTimeout(loadSnapshot, 500);
-                setTimeout(loadSnapshot, 1500);
-            } catch (err) { }
-            return;
-        }
-    }
-
-    const target = e.target.closest('div, span, p, summary, details');
-    if (target) {
-        const text = (target.innerText || '').trim();
-        if (/Thought|Thinking/i.test(text) && text.length < 500) {
-            target.style.opacity = '0.5';
-            setTimeout(() => target.style.opacity = '1', 300);
-            const firstLine = text.split('\n')[0].trim();
-            try {
-                await fetchWithAuth('/remote-click', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        selector: target.tagName.toLowerCase(),
-                        index: 0,
-                        textContent: firstLine
-                    })
-                });
-                setTimeout(loadSnapshot, 400);
-                setTimeout(loadSnapshot, 1000);
-            } catch (e) { }
-        }
-    }
-});
+if (stopBtn) stopBtn.addEventListener('click', handleStopAction);
+if (stopBarBtn) stopBarBtn.addEventListener('click', handleStopAction);
 
 // Check chat status
 async function checkChatStatus() {
