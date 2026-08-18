@@ -10,7 +10,7 @@ import fs from 'fs';
 import os from 'os';
 import WebSocket from 'ws';
 import { fileURLToPath } from 'url';
-import { dirname, join } from 'path';
+import { dirname, join, basename } from 'path';
 import { inspectUI } from './ui_inspector.js';
 import { execSync, spawn } from 'child_process';
 
@@ -2239,23 +2239,47 @@ async function createServer() {
         res.json(result);
     });
 
-    // Upload Image (attach picture to IDE chat)
-    // Upload Image (attach picture to IDE chat)
-    app.post('/upload-image', async (req, res) => {
+    // Upload File or Image (attach document, code, data, or picture to IDE chat)
+    const handleFileUpload = async (req, res) => {
         const { name, dataUrl } = req.body;
-        if (!dataUrl) return res.status(400).json({ error: 'No image data' });
+        if (!dataUrl) return res.status(400).json({ error: 'No file data' });
 
         try {
-            // Decode base64 and save to temp file
-            const matches = dataUrl.match(/^data:(.+);base64,(.+)$/);
-            if (!matches) return res.status(400).json({ error: 'Invalid data URL' });
+            // Decode base64 data URL (handles data:<mime>;base64,<content> or raw base64)
+            let buffer;
+            let mime = '';
+            const matches = dataUrl.match(/^data:([^;]*);base64,(.+)$/);
+            if (matches) {
+                mime = matches[1] || 'application/octet-stream';
+                buffer = Buffer.from(matches[2], 'base64');
+            } else {
+                buffer = Buffer.from(dataUrl, 'base64');
+            }
 
-            const ext = (matches[1].split('/')[1] || 'png').split(';')[0].replace('+xml', '');
-            const buffer = Buffer.from(matches[2], 'base64');
-            const tmpPath = join(os.tmpdir(), `antigravity_upload_${Date.now()}.${ext}`);
+            // Sanitize file name and preserve extension
+            let safeName = '';
+            if (name && typeof name === 'string') {
+                safeName = basename(name).replace(/[^a-zA-Z0-9._-]/g, '_');
+            }
+
+            let fileName = '';
+            if (safeName && safeName.length > 0) {
+                fileName = `antigravity_upload_${Date.now()}_${safeName}`;
+            } else {
+                let ext = 'bin';
+                if (mime.startsWith('image/')) {
+                    ext = (mime.split('/')[1] || 'png').split('+')[0];
+                } else if (mime.includes('/')) {
+                    const sub = mime.split('/')[1];
+                    if (sub && sub.length <= 6) ext = sub;
+                }
+                fileName = `antigravity_upload_${Date.now()}.${ext}`;
+            }
+
+            const tmpPath = join(os.tmpdir(), fileName);
             fs.writeFileSync(tmpPath, buffer);
 
-            console.log(`[UPLOAD] Saved image to ${tmpPath} (${buffer.length} bytes)`);
+            console.log(`[UPLOAD] Saved file to ${tmpPath} (${buffer.length} bytes, name: ${safeName || fileName})`);
 
             // Use CDP if available to also inject into IDE file input if present
             let uploaded = false;
@@ -2286,12 +2310,15 @@ async function createServer() {
                 }
             }
 
-            res.json({ success: true, path: tmpPath, uploadedToIde: uploaded });
+            res.json({ success: true, path: tmpPath, name: safeName || fileName, uploadedToIde: uploaded });
         } catch (e) {
             console.error('[UPLOAD] Error:', e);
             res.status(500).json({ error: e.message });
         }
-    });
+    };
+
+    app.post('/upload-file', handleFileUpload);
+    app.post('/upload-image', handleFileUpload);
 
     app.post('/stop', async (req, res) => {
         if (!cdpConnection && !(await ensureCDP())) return res.status(503).json({ error: 'CDP disconnected' });

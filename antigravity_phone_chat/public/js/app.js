@@ -592,21 +592,64 @@ function addMobileCopyButtons() {
     });
 }
 
-// --- Image Attachment Handling ---
-let attachedImages = [];
+// --- Universal Attachment Handling (Files, Code, Images, Audio, Docs) ---
+let attachedFiles = [];
 const fileInput = document.getElementById('fileInput');
 const attachBtn = document.getElementById('attachBtn');
 const attachPreview = document.getElementById('attachPreview');
 const attachPreviewInner = document.getElementById('attachPreviewInner');
 
-function addImageFile(file) {
-    if (!file || !file.type.startsWith('image/')) return;
+function getFileMeta(fileName, mimeType) {
+    const ext = (fileName.split('.').pop() || '').toLowerCase();
+    if (/^(jpe?g|png|gif|webp|svg|bmp|ico)$/i.test(ext) || (mimeType && mimeType.startsWith('image/'))) {
+        return { isImage: true, icon: '🖼️', extLabel: ext.toUpperCase() };
+    }
+    if (/^(pdf)$/i.test(ext)) return { isImage: false, icon: '📕', extLabel: 'PDF' };
+    if (/^(py|js|ts|jsx|tsx|html|css|json|cpp|c|h|rs|go|sh|bash|java|kt|php|rb|sql|yaml|yml|xml|md|toml)$/i.test(ext)) {
+        return { isImage: false, icon: '💻', extLabel: ext.toUpperCase() };
+    }
+    if (/^(zip|tar|gz|7z|rar|bz2|xz)$/i.test(ext)) return { isImage: false, icon: '📦', extLabel: ext.toUpperCase() };
+    if (/^(mp3|wav|ogg|m4a|flac|aac)$/i.test(ext) || (mimeType && mimeType.startsWith('audio/'))) {
+        return { isImage: false, icon: '🎵', extLabel: 'AUDIO' };
+    }
+    if (/^(mp4|mkv|webm|mov|avi)$/i.test(ext) || (mimeType && mimeType.startsWith('video/'))) {
+        return { isImage: false, icon: '🎬', extLabel: 'VIDEO' };
+    }
+    if (/^(txt|log|csv|tsv|env|ini|conf)$/i.test(ext)) return { isImage: false, icon: '📝', extLabel: ext.toUpperCase() };
+    if (/^(docx?|xlsx?|pptx?|epub)$/i.test(ext)) return { isImage: false, icon: '📄', extLabel: ext.toUpperCase() };
+    return { isImage: false, icon: '📄', extLabel: ext ? ext.toUpperCase().slice(0, 4) : 'FILE' };
+}
+
+function formatFileSize(bytes) {
+    if (!bytes || bytes <= 0) return '';
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+    return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+}
+
+function addAttachedFile(file) {
+    if (!file) return;
+    const meta = getFileMeta(file.name || '', file.type || '');
     const reader = new FileReader();
     reader.onload = (ev) => {
-        attachedImages.push({ file, dataUrl: ev.target.result });
+        attachedFiles.push({
+            file,
+            name: file.name || 'uploaded_file',
+            size: file.size || 0,
+            type: file.type || 'application/octet-stream',
+            isImage: meta.isImage,
+            icon: meta.icon,
+            extLabel: meta.extLabel,
+            dataUrl: ev.target.result
+        });
         renderAttachPreview();
     };
     reader.readAsDataURL(file);
+}
+
+// Backward compatibility alias
+function addImageFile(file) {
+    addAttachedFile(file);
 }
 
 if (attachBtn && fileInput) {
@@ -614,13 +657,13 @@ if (attachBtn && fileInput) {
     fileInput.addEventListener('change', (e) => {
         const files = Array.from(e.target.files);
         for (const file of files) {
-            addImageFile(file);
+            addAttachedFile(file);
         }
         fileInput.value = '';
     });
 }
 
-// Support pasting images directly from clipboard (Ctrl+V / long press)
+// Support pasting images or files directly from clipboard (Ctrl+V / long press)
 if (messageInput) {
     messageInput.addEventListener('input', () => {
         messageInput.style.height = 'auto';
@@ -638,11 +681,11 @@ if (messageInput) {
         const items = (e.clipboardData || window.clipboardData)?.items;
         if (items) {
             for (const item of items) {
-                if (item.type && item.type.startsWith('image/')) {
+                if (item.kind === 'file') {
                     const file = item.getAsFile();
                     if (file) {
-                        addImageFile(file);
-                        showToast('📎 Image pasted from clipboard');
+                        addAttachedFile(file);
+                        showToast(`📎 Attached ${file.name || 'file from clipboard'}`);
                         e.preventDefault();
                     }
                 }
@@ -653,82 +696,106 @@ if (messageInput) {
 
 function renderAttachPreview() {
     if (!attachPreview || !attachPreviewInner) return;
-    if (attachedImages.length === 0) {
+    if (attachedFiles.length === 0) {
         attachPreview.style.display = 'none';
         attachPreviewInner.innerHTML = '';
         return;
     }
     attachPreview.style.display = 'block';
-    attachPreviewInner.innerHTML = attachedImages.map((img, idx) => `
-        <div class="attach-thumb">
-            <img src="${img.dataUrl}" alt="attachment" />
-            <button class="attach-thumb-remove" onclick="removeAttachedImage(${idx})">×</button>
-        </div>
-    `).join('');
+    attachPreviewInner.innerHTML = attachedFiles.map((item, idx) => {
+        if (item.isImage) {
+            return `
+                <div class="attach-thumb" title="${escapeHtml(item.name)} (${formatFileSize(item.size)})">
+                    <img src="${item.dataUrl}" alt="attachment" />
+                    <button class="attach-thumb-remove" onclick="removeAttachedFile(${idx})">×</button>
+                </div>
+            `;
+        }
+        return `
+            <div class="attach-thumb file-card" title="${escapeHtml(item.name)} (${formatFileSize(item.size)})">
+                <div class="attach-file-icon">${item.icon}</div>
+                <div class="attach-file-name">${escapeHtml(item.name)}</div>
+                <div class="attach-file-size">${formatFileSize(item.size)}</div>
+                <button class="attach-thumb-remove" onclick="removeAttachedFile(${idx})">×</button>
+            </div>
+        `;
+    }).join('');
 }
 
-window.removeAttachedImage = function (idx) {
-    attachedImages.splice(idx, 1);
+window.removeAttachedFile = function (idx) {
+    attachedFiles.splice(idx, 1);
     renderAttachPreview();
 };
+
+window.removeAttachedImage = window.removeAttachedFile;
 
 // --- Send Message (Supports direct send, queue, and force-send) ---
 async function sendMessage({ forceQueue = false, forceSend = false } = {}) {
     const text = messageInput.value.trim();
-    if (!text && attachedImages.length === 0) return;
+    if (!text && attachedFiles.length === 0) return;
 
     // Optimistic frontrunning bubble in the UI
     try {
         const bubble = document.createElement('div');
         bubble.className = 'optimistic-user-bubble';
         bubble.style.cssText = 'background: #2563eb; color: #ffffff; padding: 10px 14px; border-radius: 14px 14px 2px 14px; margin: 10px 8px 10px auto; max-width: 85%; font-size: 14px; line-height: 1.5; word-break: break-word; box-shadow: 0 2px 8px rgba(37,99,235,0.25); text-align: left;';
-        bubble.textContent = text || 'Sent image attachment';
+        bubble.textContent = text || (attachedFiles.length === 1 ? `Sent file: ${attachedFiles[0].name}` : `Sent ${attachedFiles.length} file attachments`);
         chatContent.appendChild(bubble);
         chatContainer.scrollTop = chatContainer.scrollHeight;
     } catch(e) {}
-    if (!text && attachedImages.length === 0) return;
+    if (!text && attachedFiles.length === 0) return;
 
     if (sendBtn) sendBtn.disabled = true;
     if (queueBtn) queueBtn.disabled = true;
     messageInput.disabled = true;
 
     try {
-        const uploadedPaths = [];
-        // Upload images first if any
-        if (attachedImages.length > 0) {
-            showToast(`Uploading ${attachedImages.length} image(s)...`);
-            for (const img of attachedImages) {
+        const uploadedItems = [];
+        // Upload files first if any
+        if (attachedFiles.length > 0) {
+            showToast(`Uploading ${attachedFiles.length} file(s)...`);
+            for (const item of attachedFiles) {
                 try {
-                    const res = await fetchWithAuth('/upload-image', {
+                    const res = await fetchWithAuth('/upload-file', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
-                            name: img.file ? img.file.name : 'image.png',
-                            dataUrl: img.dataUrl
+                            name: item.name,
+                            dataUrl: item.dataUrl
                         })
                     });
                     const uData = await res.json();
                     if (uData.path) {
-                        uploadedPaths.push(uData.path);
+                        uploadedItems.push({
+                            path: uData.path,
+                            name: item.name,
+                            isImage: item.isImage
+                        });
                     } else if (uData.error) {
-                        console.warn('Image upload error:', uData.error);
-                        showToast('Image upload: ' + uData.error);
+                        console.warn('File upload error:', uData.error);
+                        showToast('File upload: ' + uData.error);
                     }
-                } catch (imgErr) {
-                    console.error('Failed to upload image:', imgErr);
+                } catch (err) {
+                    console.error('Failed to upload file:', err);
                 }
             }
-            attachedImages = [];
+            attachedFiles = [];
             renderAttachPreview();
         }
 
         let messageToSend = text;
-        if (uploadedPaths.length > 0) {
-            const fileRefs = uploadedPaths.map(p => `[Uploaded Image/Screenshot: ${p}]`).join('\n');
+        if (uploadedItems.length > 0) {
+            const fileRefs = uploadedItems.map(item => {
+                if (item.isImage) {
+                    return `[Uploaded Image/Screenshot: ${item.path}]`;
+                }
+                return `[Uploaded File: ${item.path}] (${item.name})`;
+            }).join('\n');
+
             if (messageToSend) {
                 messageToSend = `${messageToSend}\n\n${fileRefs}`;
             } else {
-                messageToSend = `I have uploaded the following screenshot(s)/image(s):\n${fileRefs}\nPlease inspect them and assist me.`;
+                messageToSend = `I have uploaded the following file(s):\n${fileRefs}\nPlease inspect them and assist me.`;
             }
         }
 

@@ -673,6 +673,47 @@ body {
     line-height: 16px;
     text-align: center;
     cursor: pointer;
+    z-index: 2;
+}
+
+.attach-thumb.file-card {
+    width: auto;
+    min-width: 68px;
+    max-width: 140px;
+    height: 50px;
+    background: #182234;
+    border: 1px solid rgba(59, 130, 246, 0.45);
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    padding: 4px 18px 4px 8px;
+    box-sizing: border-box;
+    cursor: default;
+    border-radius: 6px;
+}
+
+.attach-thumb.file-card .attach-file-icon {
+    font-size: 16px;
+    line-height: 1;
+    margin-bottom: 2px;
+}
+
+.attach-thumb.file-card .attach-file-name {
+    font-size: 11px;
+    color: #e2e8f0;
+    font-weight: 500;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    text-align: center;
+}
+
+.attach-thumb.file-card .attach-file-size {
+    font-size: 9px;
+    color: #94a3b8;
+    line-height: 1;
 }
 
 textarea {
