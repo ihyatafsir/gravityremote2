@@ -537,6 +537,63 @@ table {
     margin: 8px 0 !important;
 }
 
+
+/* Greenish Theme Overrides for Tool Execution Tabs & Step Pills */
+button[data-testid="worked-for-collapsible"],
+button[class*="tabular-nums"],
+[class*="rounded-lg"][class*="border"],
+button:has(svg path[d*="517.85-480"]),
+button:has(svg[class*="duration-200"]),
+button.group.flex.items-center {
+    background: linear-gradient(135deg, rgba(34, 197, 94, 0.12) 0%, rgba(14, 26, 18, 0.8) 100%) !important;
+    border: 1px solid rgba(34, 197, 94, 0.35) !important;
+    color: #4ade80 !important;
+    border-radius: 10px !important;
+    padding: 6px 12px !important;
+    margin: 4px 0 !important;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4) !important;
+    cursor: pointer !important;
+}
+
+button[data-testid="worked-for-collapsible"]:hover,
+button[data-testid="worked-for-collapsible"]:active,
+button[class*="tabular-nums"]:active {
+    background: linear-gradient(135deg, rgba(34, 197, 94, 0.22) 0%, rgba(18, 38, 26, 0.95) 100%) !important;
+    border-color: rgba(34, 197, 94, 0.65) !important;
+    box-shadow: 0 0 12px rgba(34, 197, 94, 0.3) !important;
+}
+
+button[data-testid="worked-for-collapsible"] span,
+button[class*="tabular-nums"] span,
+[class*="text-secondary-foreground"] {
+    color: #86efac !important;
+    font-weight: 500 !important;
+}
+
+button[data-testid="worked-for-collapsible"] svg,
+button[class*="tabular-nums"] svg {
+    color: #4ade80 !important;
+    fill: currentColor !important;
+    stroke: currentColor !important;
+}
+
+code,
+[class*="font-mono"][class*="truncate"],
+[class*="whitespace-pre-wrap"] {
+    background: rgba(34, 197, 94, 0.12) !important;
+    color: #a7f3d0 !important;
+    border: 1px solid rgba(34, 197, 94, 0.28) !important;
+    border-radius: 6px !important;
+}
+
+div[class*="bg-card"],
+div[class*="bg-muted"],
+div[class*="bg-secondary"] {
+    background: #141b17 !important;
+    border-color: rgba(34, 197, 94, 0.22) !important;
+    color: #d1fae5 !important;
+}
+
 table th, table td {
     word-break: break-word !important;
     overflow-wrap: anywhere !important;
@@ -1415,3 +1472,51 @@ fetchAppState();
 setInterval(fetchAppState, 5000);
 checkChatStatus();
 prefetchHistory();
+
+
+// --- Interactive Expandable Tool Tabs ---
+if (chatContent) {
+    chatContent.addEventListener('click', async (e) => {
+        const collapsibleBtn = e.target.closest('button[data-testid="worked-for-collapsible"]') ||
+                              e.target.closest('button[class*="tabular-nums"]') ||
+                              e.target.closest('button:has(svg path[d*="517.85-480"])');
+        if (!collapsibleBtn) return;
+
+        e.preventDefault();
+        e.stopPropagation();
+
+        // Visual feedback
+        collapsibleBtn.style.opacity = '0.6';
+        collapsibleBtn.style.transform = 'scale(0.98)';
+        setTimeout(() => {
+            collapsibleBtn.style.opacity = '1';
+            collapsibleBtn.style.transform = '';
+        }, 200);
+
+        const textContent = (collapsibleBtn.innerText || '').trim();
+        const testId = collapsibleBtn.getAttribute('data-testid') || '';
+        
+        // Find index of this button among all similar buttons in chatContent
+        const allButtons = Array.from(chatContent.querySelectorAll('button[data-testid="worked-for-collapsible"], button[class*="tabular-nums"], button:has(svg path[d*="517.85-480"])'));
+        const index = allButtons.indexOf(collapsibleBtn);
+
+        try {
+            await fetchWithAuth('/remote-click', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    testId: testId || undefined,
+                    selector: 'button[data-testid="worked-for-collapsible"], button[class*="tabular-nums"]',
+                    index: index >= 0 ? index : 0,
+                    textContent: textContent || undefined
+                })
+            });
+
+            // Fast refresh snapshot to show expanded/collapsed view
+            setTimeout(loadSnapshot, 150);
+            setTimeout(loadSnapshot, 500);
+        } catch (err) {
+            console.warn('Collapsible click error:', err);
+        }
+    });
+}
