@@ -538,14 +538,90 @@ table {
 }
 
 
-/* Greenish Theme Overrides for Tool Execution Tabs & Step Pills */
+
+/* ==========================================
+   ◆ Revert Regular Chat Text to Crisp White/Gray
+   ========================================== */
+#conversation p, #chat p, #cascade p,
+#conversation li, #chat li, #cascade li,
+#conversation h1, #chat h1, #cascade h1,
+#conversation h2, #chat h2, #cascade h2,
+#conversation h3, #chat h3, #cascade h3,
+#conversation h4, #chat h4, #cascade h4 {
+    color: #e2e8f0 !important;
+}
+
+#chatContent [class*="text-muted-foreground"]:not(.artifact-card *):not([data-testid="worked-for-collapsible"] *) {
+    color: #94a3b8 !important;
+}
+
+#chatContent [class*="text-secondary-foreground"]:not(.artifact-card *):not([data-testid="worked-for-collapsible"] *) {
+    color: #e2e8f0 !important;
+}
+
+/* ==========================================
+   ◆ White Artifact Tabs -> Greenish Theme & Expandable
+   ========================================== */
+.artifact-card,
+#chatContent .artifact-card,
+div.border.rounded-xl.artifact-card,
+div[class*="artifact-card"],
+div.border.my-0\.5.rounded-xl,
+button[draggable="true"],
+#chatContent div:has(> button[draggable="true"]),
+#chatContent button:has(svg path[d*="M320-253.85"]) {
+    background: linear-gradient(135deg, rgba(34, 197, 94, 0.14) 0%, rgba(15, 28, 20, 0.85) 100%) !important;
+    border: 1px solid rgba(34, 197, 94, 0.45) !important;
+    border-radius: 12px !important;
+    padding: 7px 14px !important;
+    margin: 6px 0 !important;
+    color: #86efac !important;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4), inset 0 0 12px rgba(34, 197, 94, 0.08) !important;
+    cursor: pointer !important;
+    display: inline-flex !important;
+    flex-direction: row !important;
+    align-items: center !important;
+    gap: 8px !important;
+    transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1) !important;
+    width: auto !important;
+    max-width: 100% !important;
+}
+
+.artifact-card:hover,
+.artifact-card:active,
+#chatContent .artifact-card:active {
+    background: linear-gradient(135deg, rgba(34, 197, 94, 0.24) 0%, rgba(18, 42, 28, 0.95) 100%) !important;
+    border-color: #22c55e !important;
+    box-shadow: 0 0 16px rgba(34, 197, 94, 0.35) !important;
+    transform: scale(0.985);
+}
+
+.artifact-card button,
+.artifact-card span,
+.artifact-card button span,
+#chatContent .artifact-card button,
+#chatContent .artifact-card span {
+    color: #86efac !important;
+    font-weight: 600 !important;
+    font-size: 13.5px !important;
+    pointer-events: auto !important;
+}
+
+.artifact-card svg,
+.artifact-card button svg,
+#chatContent .artifact-card svg {
+    color: #4ade80 !important;
+    fill: currentColor !important;
+    stroke: currentColor !important;
+    width: 18px !important;
+    height: 18px !important;
+    flex-shrink: 0 !important;
+}
+
+/* Collapsible tool steps (Ran X commands, etc.) */
 button[data-testid="worked-for-collapsible"],
-button[class*="tabular-nums"],
-[class*="rounded-lg"][class*="border"],
-button:has(svg path[d*="517.85-480"]),
-button:has(svg[class*="duration-200"]),
-button.group.flex.items-center {
-    background: linear-gradient(135deg, rgba(34, 197, 94, 0.12) 0%, rgba(14, 26, 18, 0.8) 100%) !important;
+button[class*="tabular-nums"] {
+    background: linear-gradient(135deg, rgba(34, 197, 94, 0.1) 0%, rgba(14, 26, 18, 0.8) 100%) !important;
     border: 1px solid rgba(34, 197, 94, 0.35) !important;
     color: #4ade80 !important;
     border-radius: 10px !important;
@@ -555,43 +631,15 @@ button.group.flex.items-center {
     cursor: pointer !important;
 }
 
-button[data-testid="worked-for-collapsible"]:hover,
-button[data-testid="worked-for-collapsible"]:active,
-button[class*="tabular-nums"]:active {
-    background: linear-gradient(135deg, rgba(34, 197, 94, 0.22) 0%, rgba(18, 38, 26, 0.95) 100%) !important;
-    border-color: rgba(34, 197, 94, 0.65) !important;
-    box-shadow: 0 0 12px rgba(34, 197, 94, 0.3) !important;
-}
-
 button[data-testid="worked-for-collapsible"] span,
-button[class*="tabular-nums"] span,
-[class*="text-secondary-foreground"] {
+button[class*="tabular-nums"] span {
     color: #86efac !important;
-    font-weight: 500 !important;
 }
 
 button[data-testid="worked-for-collapsible"] svg,
 button[class*="tabular-nums"] svg {
     color: #4ade80 !important;
     fill: currentColor !important;
-    stroke: currentColor !important;
-}
-
-code,
-[class*="font-mono"][class*="truncate"],
-[class*="whitespace-pre-wrap"] {
-    background: rgba(34, 197, 94, 0.12) !important;
-    color: #a7f3d0 !important;
-    border: 1px solid rgba(34, 197, 94, 0.28) !important;
-    border-radius: 6px !important;
-}
-
-div[class*="bg-card"],
-div[class*="bg-muted"],
-div[class*="bg-secondary"] {
-    background: #141b17 !important;
-    border-color: rgba(34, 197, 94, 0.22) !important;
-    color: #d1fae5 !important;
 }
 
 table th, table td {
@@ -1473,32 +1521,33 @@ setInterval(fetchAppState, 5000);
 checkChatStatus();
 prefetchHistory();
 
-
-// --- Interactive Expandable Tool Tabs ---
+// --- Interactive Expandable Tool Tabs & Artifact Cards ---
 if (chatContent) {
     chatContent.addEventListener('click', async (e) => {
+        const artifactCard = e.target.closest('.artifact-card') ||
+                             e.target.closest('div.border.rounded-xl') ||
+                             e.target.closest('div:has(> button[draggable="true"])');
+
         const collapsibleBtn = e.target.closest('button[data-testid="worked-for-collapsible"]') ||
                               e.target.closest('button[class*="tabular-nums"]') ||
                               e.target.closest('button:has(svg path[d*="517.85-480"])');
-        if (!collapsibleBtn) return;
+
+        const targetEl = artifactCard || collapsibleBtn;
+        if (!targetEl) return;
 
         e.preventDefault();
         e.stopPropagation();
 
-        // Visual feedback
-        collapsibleBtn.style.opacity = '0.6';
-        collapsibleBtn.style.transform = 'scale(0.98)';
+        // Visual tactile feedback
+        targetEl.style.opacity = '0.6';
+        targetEl.style.transform = 'scale(0.97)';
         setTimeout(() => {
-            collapsibleBtn.style.opacity = '1';
-            collapsibleBtn.style.transform = '';
-        }, 200);
+            targetEl.style.opacity = '1';
+            targetEl.style.transform = '';
+        }, 180);
 
-        const textContent = (collapsibleBtn.innerText || '').trim();
-        const testId = collapsibleBtn.getAttribute('data-testid') || '';
-        
-        // Find index of this button among all similar buttons in chatContent
-        const allButtons = Array.from(chatContent.querySelectorAll('button[data-testid="worked-for-collapsible"], button[class*="tabular-nums"], button:has(svg path[d*="517.85-480"])'));
-        const index = allButtons.indexOf(collapsibleBtn);
+        const textContent = (targetEl.innerText || '').trim();
+        const testId = targetEl.getAttribute('data-testid') || '';
 
         try {
             await fetchWithAuth('/remote-click', {
@@ -1506,17 +1555,16 @@ if (chatContent) {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     testId: testId || undefined,
-                    selector: 'button[data-testid="worked-for-collapsible"], button[class*="tabular-nums"]',
-                    index: index >= 0 ? index : 0,
+                    selector: artifactCard ? '.artifact-card, div.border.rounded-xl, button[draggable="true"]' : 'button[data-testid="worked-for-collapsible"], button[class*="tabular-nums"]',
                     textContent: textContent || undefined
                 })
             });
 
-            // Fast refresh snapshot to show expanded/collapsed view
-            setTimeout(loadSnapshot, 150);
-            setTimeout(loadSnapshot, 500);
+            // Fast refresh snapshot
+            setTimeout(loadSnapshot, 200);
+            setTimeout(loadSnapshot, 600);
         } catch (err) {
-            console.warn('Collapsible click error:', err);
+            console.warn('Click error:', err);
         }
     });
 }
