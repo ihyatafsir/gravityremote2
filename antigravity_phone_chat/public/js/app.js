@@ -149,15 +149,114 @@ checkSslStatus();
 
 // --- Models ---
 const MODELS = [
-    "Gemini 3.7 Flash (High)",
-    "Gemini 3.7 Flash (Medium)",
-    "Gemini 3.7 Flash (Low)",
-    "Gemini 3.6 Flash (High)",
+    "Gemini 3.7 Flash High",
+    "Gemini 3.6 Flash Medium",
+    "Gemini 3.5 Flash Medium",
+    "Gemini 3.1 Pro Low",
     "Claude Sonnet 4.6 (Thinking)",
-    "Claude Opus 4.6 (Thinking) 💎",
-    "GPT-OSS 120B (Medium)",
-    "DeepSeek R1 (Reasoning) ⚡"
+    "Claude Opus 4.6 (Thinking)",
+    "GPT-OSS 120B (Medium)"
 ];
+
+// --- Modal Dialog System (Models, Modes) ---
+function openModal(title, options, onSelect) {
+    if (!modalTitle || !modalList || !modalOverlay) return;
+    modalTitle.textContent = title;
+    modalList.innerHTML = '';
+
+    const currentVal = (title === 'Select Model' ? (modelText ? modelText.textContent.trim() : '') : (modeText ? modeText.textContent.trim() : ''));
+
+    options.forEach(opt => {
+        const div = document.createElement('div');
+        div.className = 'modal-option';
+        if (currentVal && (opt.toLowerCase().includes(currentVal.toLowerCase()) || currentVal.toLowerCase().includes(opt.toLowerCase()))) {
+            div.style.background = 'rgba(34, 197, 94, 0.15)';
+            div.style.color = '#4ade80';
+            div.style.fontWeight = '600';
+        }
+        div.textContent = opt;
+        div.onclick = () => {
+            onSelect(opt);
+            closeModal();
+        };
+        modalList.appendChild(div);
+    });
+
+    modalOverlay.classList.add('show');
+}
+
+function closeModal() {
+    if (modalOverlay) modalOverlay.classList.remove('show');
+}
+window.closeModal = closeModal;
+
+if (modalOverlay) {
+    modalOverlay.onclick = (e) => {
+        if (e.target === modalOverlay) closeModal();
+    };
+}
+
+// Mode Selector Trigger (Fast / Planning)
+if (modeBtn) {
+    modeBtn.addEventListener('click', () => {
+        openModal('Select Mode', ['Fast', 'Planning'], async (mode) => {
+            const prev = modeText ? modeText.textContent : 'Fast';
+            if (modeText) modeText.textContent = 'Setting...';
+            showToast(`Switching mode to ${mode}...`);
+            try {
+                const res = await fetchWithAuth('/set-mode', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ mode })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    currentMode = mode;
+                    if (modeText) modeText.textContent = mode;
+                    modeBtn.classList.toggle('active', mode === 'Planning');
+                    showToast(`✅ Mode set to ${mode}`);
+                    setTimeout(fetchAppState, 800);
+                } else {
+                    showToast(`❌ Error: ${data.error || 'Failed to change mode'}`);
+                    if (modeText) modeText.textContent = prev;
+                }
+            } catch (e) {
+                showToast(`❌ Error: ${e.message}`);
+                if (modeText) modeText.textContent = prev;
+            }
+        });
+    });
+}
+
+// Model Selector Trigger
+if (modelBtn) {
+    modelBtn.addEventListener('click', () => {
+        openModal('Select Model', MODELS, async (model) => {
+            const prev = modelText ? modelText.textContent : '';
+            if (modelText) modelText.textContent = 'Setting...';
+            showToast(`Switching AI model to ${model}...`);
+            try {
+                const res = await fetchWithAuth('/set-model', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ model })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    if (modelText) modelText.textContent = model;
+                    showToast(`✅ AI model switched to ${model}`);
+                    setTimeout(fetchAppState, 800);
+                } else {
+                    showToast(`❌ Error: ${data.error || 'Failed to switch model'}`);
+                    if (modelText) modelText.textContent = prev;
+                }
+            } catch (e) {
+                showToast(`❌ Error: ${e.message}`);
+                if (modelText) modelText.textContent = prev;
+            }
+        });
+    });
+}
 
 
 // --- Message Queue & Agent State UI ---

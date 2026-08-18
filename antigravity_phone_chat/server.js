@@ -1218,7 +1218,7 @@ async function setModel(cdp, modelName) {
             let modelBtn = null;
             
             // Strategy 1: Look for data-tooltip-id patterns (most reliable)
-            modelBtn = document.querySelector('[data-tooltip-id*="model"], [data-tooltip-id*="provider"]');
+            modelBtn = document.querySelector('[data-testid="model-selector-trigger"], [data-tooltip-id*="model"], [data-tooltip-id*="provider"]');
             
             // Strategy 2: Look for buttons/elements containing model keywords with SVG icons
             if (!modelBtn) {
@@ -1695,22 +1695,24 @@ async function getAppState(cdp) {
             state.mode = modeTexts[0];
         }
 
-        // 2. Get Model (Gemini, Claude, GPT)
-        // Strategy: Only scan buttons that could be model selectors (usually header)
-        // rather than the whole document.
-        const KNOWN_MODELS = ["Gemini", "Claude", "GPT"];
-        const headerButtons = Array.from(document.querySelectorAll('button, [role="button"]'));
-        
-        for (const btn of headerButtons) {
-            const txt = btn.textContent || '';
-            if (KNOWN_MODELS.some(k => txt.includes(k))) {
-                // Must have a chevron or be a likely model button
-                if (btn.querySelector('svg[class*="chevron"]') ||
-                    btn.querySelector('svg.lucide-chevron-up') ||
-                    btn.querySelector('svg.lucide-chevron-down') ||
-                    btn.closest('header')) {
-                    state.model = txt.trim();
-                    break;
+        // 2. Get Model
+        const trigger = document.querySelector('[data-testid="model-selector-trigger"], [data-tooltip-id*="model"]');
+        if (trigger) {
+            state.model = trigger.innerText?.trim() || 'Unknown';
+        } else {
+            const KNOWN_MODELS = ["Gemini", "Claude", "GPT", "DeepSeek"];
+            const headerButtons = Array.from(document.querySelectorAll('button, [role="button"]'));
+            for (const btn of headerButtons) {
+                const txt = btn.innerText?.trim() || '';
+                if (KNOWN_MODELS.some(k => txt.includes(k))) {
+                    if (btn.querySelector('svg[class*="chevron"]') ||
+                        btn.querySelector('svg.lucide-chevron-up') ||
+                        btn.querySelector('svg.lucide-chevron-down') ||
+                        btn.querySelector('svg') ||
+                        btn.closest('header')) {
+                        state.model = txt;
+                        break;
+                    }
                 }
             }
         }
