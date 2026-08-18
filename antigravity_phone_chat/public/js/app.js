@@ -149,10 +149,14 @@ checkSslStatus();
 
 // --- Models (Matching Desktop IDE Providers & Submodels) ---
 const MODELS = [
-    "Gemini 3.7 Flash High",
-    "Gemini 3.6 Flash Medium",
-    "Gemini 3.5 Flash Medium",
-    "Gemini 3.1 Pro Low",
+    "Gemini 3.7 Flash (High)",
+    "Gemini 3.7 Flash (Medium)",
+    "Gemini 3.7 Flash (Low)",
+    "Gemini 3.6 Flash (High)",
+    "Gemini 3.6 Flash (Medium)",
+    "Gemini 3.6 Flash (Low)",
+    "Gemini 3.5 Flash (Medium)",
+    "Gemini 3.1 Pro (Low)",
     "Claude Sonnet 4.6 (Thinking)",
     "Claude Opus 4.6 (Thinking)",
     "GPT-OSS 120B (Medium)"
@@ -510,6 +514,22 @@ ${data.css || ''}
 }
 
 /* User Message Bubble styling */
+.optimistic-user-bubble {
+    background: #252526 !important;
+    color: #f1f5f9 !important;
+    border: 1px solid #383838 !important;
+    border-radius: 12px !important;
+    padding: 10px 14px !important;
+    margin: 10px 4px 10px auto !important;
+    max-width: 90% !important;
+    font-size: 14.5px !important;
+    line-height: 1.5 !important;
+    word-break: break-word !important;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35) !important;
+    text-align: left !important;
+    white-space: pre-wrap !important;
+}
+
 [role="article"],
 [data-testid="user-input-step"],
 .group\/user-input-step {
@@ -942,7 +962,7 @@ async function sendMessage({ forceQueue = false, forceSend = false } = {}) {
     try {
         const bubble = document.createElement('div');
         bubble.className = 'optimistic-user-bubble';
-        bubble.style.cssText = 'background: #2563eb; color: #ffffff; padding: 10px 14px; border-radius: 14px 14px 2px 14px; margin: 10px 8px 10px auto; max-width: 85%; font-size: 14px; line-height: 1.5; word-break: break-word; box-shadow: 0 2px 8px rgba(37,99,235,0.25); text-align: left;';
+        bubble.style.cssText = 'background: #252526; color: #f1f5f9; border: 1px solid #383838; padding: 10px 14px; border-radius: 12px; margin: 10px 4px 10px auto; max-width: 90%; font-size: 14.5px; line-height: 1.5; word-break: break-word; box-shadow: 0 2px 8px rgba(0,0,0,0.35); text-align: left; white-space: pre-wrap;';
         bubble.textContent = text || (attachedFiles.length === 1 ? `Sent file: ${attachedFiles[0].name}` : `Sent ${attachedFiles.length} file attachments`);
         chatContent.appendChild(bubble);
         chatContainer.scrollTop = chatContainer.scrollHeight;

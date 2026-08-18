@@ -1183,139 +1183,100 @@ async function remoteScroll(cdp, { scrollTop, scrollPercent }) {
 
 // Set AI Model
 async function setModel(cdp, modelName) {
+    const safeModelName = JSON.stringify(modelName || '');
     const EXP = `(async () => {
         try {
-            // STRATEGY: Multi-layered approach to find and click the model selector
-            const KNOWN_KEYWORDS = ["Gemini", "Claude", "GPT", "Model"];
+            const requested = (${safeModelName}).trim();
+            if (!requested) return { error: 'No model specified' };
             
-            let modelBtn = null;
+            // Find model selector trigger
+            const trigger = document.querySelector('[data-testid="model-selector-trigger"], [data-tooltip-id*="model"], [data-tooltip-id*="provider"]') ||
+                            Array.from(document.querySelectorAll('button, div')).find(el => (el.innerText?.includes('Gemini') || el.innerText?.includes('Claude')) && el.offsetParent !== null);
+            if (!trigger) return { error: 'Model selector trigger not found' };
             
-            // Strategy 1: Look for data-tooltip-id patterns (most reliable)
-            modelBtn = document.querySelector('[data-testid="model-selector-trigger"], [data-tooltip-id*="model"], [data-tooltip-id*="provider"]');
+            // Trigger open popup
+            trigger.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+            trigger.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+            trigger.click();
+            await new Promise(r => setTimeout(r, 350));
             
-            // Strategy 2: Look for buttons/elements containing model keywords with SVG icons
-            if (!modelBtn) {
-                const candidates = Array.from(document.querySelectorAll('button, [role="button"], div, span'))
-                    .filter(el => {
-                        const txt = el.innerText?.trim() || '';
-                        return KNOWN_KEYWORDS.some(k => txt.includes(k)) && el.offsetParent !== null;
-                    });
-
-                // Find the best one (has chevron icon or cursor pointer)
-                modelBtn = candidates.find(el => {
-                    const style = window.getComputedStyle(el);
-                    const hasSvg = el.querySelector('svg.lucide-chevron-up') || 
-                                   el.querySelector('svg.lucide-chevron-down') || 
-                                   el.querySelector('svg[class*="chevron"]') ||
-                                   el.querySelector('svg');
-                    return (style.cursor === 'pointer' || el.tagName === 'BUTTON') && hasSvg;
-                }) || candidates[0];
+            // Find popup container
+            let popper = null;
+            for (let i = 0; i < 15; i++) {
+                const popups = Array.from(document.querySelectorAll('[data-radix-popper-content-wrapper], [role="menu"]:not(.menubar-menu)'))
+                                   .filter(p => p.offsetHeight > 0 && (p.innerText?.includes('Gemini') || p.innerText?.includes('Claude') || p.innerText?.includes('Model')));
+                if (popups.length > 0) {
+                    popper = popups[0];
+                    break;
+                }
+                await new Promise(r => setTimeout(r, 50));
+            }
+            if (!popper) return { error: 'Model list popup did not open' };
+            
+            // Parse requested model into base model and effort
+            let baseModel = requested;
+            let effort = null;
+            const effortMatch = requested.match(/\((High|Medium|Low|Thinking)\)|\s+(High|Medium|Low)$/i);
+            if (effortMatch) {
+                effort = (effortMatch[1] || effortMatch[2]).toLowerCase();
+                baseModel = requested.replace(effortMatch[0], '').trim();
             }
             
-            // Strategy 3: Traverse from text nodes up to clickable parents
-            if (!modelBtn) {
-                const allEls = Array.from(document.querySelectorAll('*'));
-                const textNodes = allEls.filter(el => {
-                    if (el.children.length > 0) return false;
-                    const txt = el.textContent;
-                    return KNOWN_KEYWORDS.some(k => txt.includes(k));
+            const menuItems = Array.from(popper.querySelectorAll('[role="menuitem"], [data-testid="model-selector-item"]'))
+                                   .filter(el => el.offsetParent !== null);
+            
+            let targetItem = menuItems.find(m => {
+                const baseAttr = m.querySelector('[data-model-base]')?.getAttribute('data-model-base');
+                const labelAttr = m.getAttribute('data-model-label');
+                const txt = m.innerText || '';
+                if (labelAttr && (labelAttr === requested || labelAttr.includes(baseModel))) return true;
+                if (baseAttr && (baseAttr === baseModel || baseModel.includes(baseAttr))) return true;
+                return txt.includes(baseModel);
+            });
+            
+            if (!targetItem) {
+                targetItem = menuItems.find(m => {
+                    const firstWord = baseModel.split(' ')[0];
+                    const numMatch = baseModel.match(/\d+\.\d+/);
+                    const txt = m.innerText || '';
+                    if (numMatch && txt.includes(numMatch[0]) && txt.includes(firstWord)) return true;
+                    return txt.includes(firstWord);
                 });
-
-                for (const el of textNodes) {
-                    let current = el;
-                    for (let i = 0; i < 5; i++) {
-                        if (!current) break;
-                        if (current.tagName === 'BUTTON' || window.getComputedStyle(current).cursor === 'pointer') {
-                            modelBtn = current;
-                            break;
-                        }
-                        current = current.parentElement;
-                    }
-                    if (modelBtn) break;
-                }
             }
-
-            if (!modelBtn) return { error: 'Model selector button not found' };
-
-            // Click to open menu
-            modelBtn.click();
-            await new Promise(r => setTimeout(r, 600));
-
-            // Find the dialog/dropdown - search globally (React portals render at body level)
-            let visibleDialog = null;
-            const rootSearchWord = '${modelName}'.split(' ')[0]; // E.g., "Gemini", "Claude", "GPT"
             
-            // Try specific dialog patterns first
-            const dialogs = Array.from(document.querySelectorAll('[role="dialog"], [role="listbox"], [role="menu"], [data-radix-popper-content-wrapper]'));
-            visibleDialog = dialogs.find(d => d.offsetHeight > 0 && d.innerText?.includes(rootSearchWord));
+            if (!targetItem) return { error: 'Target model item not found for: ' + baseModel };
             
-            // Fallback: look for positioned divs
-            if (!visibleDialog) {
-                visibleDialog = Array.from(document.querySelectorAll('div'))
-                    .find(d => {
-                        const style = window.getComputedStyle(d);
-                        return d.offsetHeight > 0 && 
-                               (style.position === 'absolute' || style.position === 'fixed') && 
-                               d.innerText?.includes(rootSearchWord) && 
-                               !d.innerText?.includes('Files With Changes');
-                    });
-            }
-
-            if (!visibleDialog) {
-                // Blind search across entire document as last resort
-                const allElements = Array.from(document.querySelectorAll('[role="menuitem"], [role="option"]'));
-                const target = allElements.find(el => 
-                    el.offsetParent !== null && 
-                    (el.innerText?.trim() === '${modelName}' || el.innerText?.includes(rootSearchWord))
-                );
-                if (target) {
-                    target.click();
-                    return { success: true, method: 'blind_search' };
-                }
-                return { error: 'Model list not opened' };
-            }
-
-            // Select specific model inside the dialog
-            const allDialogEls = Array.from(visibleDialog.querySelectorAll('*'));
-            const validEls = allDialogEls.filter(el => el.children.length === 0 && el.textContent?.trim().length > 0);
+            const hasSubmenu = targetItem.getAttribute('aria-haspopup') === 'menu' || targetItem.querySelector('[data-testid="model-selector-effort-group"]');
             
-            // A. Exact Match (Best)
-            let target = validEls.find(el => el.textContent.trim() === '${modelName}');
-            
-            // B. Page contains Model exact string
-            if (!target) {
-                target = validEls.find(el => el.textContent.includes('${modelName}'));
-            }
-
-            // C. Token-based Substring matching (Fuzzy)
-            if (!target) {
-                // Break requested model into significant words (ignore numbers, punctuation, short words)
-                // e.g. "Claude Sonnet 4.5" -> ["Claude", "Sonnet"]
-                const searchTokens = '${modelName}'.split(/[\\s\\()]+/).filter(t => /^[a-zA-Z]{3,}$/.test(t));
+            if (hasSubmenu && effort && effort !== 'thinking') {
+                targetItem.focus();
+                targetItem.dispatchEvent(new PointerEvent('pointerenter', { bubbles: true }));
+                targetItem.dispatchEvent(new PointerEvent('pointerover', { bubbles: true }));
+                targetItem.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', code: 'ArrowRight', keyCode: 39, bubbles: true }));
+                await new Promise(r => setTimeout(r, 300));
                 
-                const scoredMatches = validEls.map(el => {
-                    const txt = el.textContent;
-                    let score = 0;
-                    for (const token of searchTokens) {
-                        if (txt.includes(token)) score++;
-                    }
-                    return { el, score };
-                }).filter(m => m.score > 0);
-
-                if (scoredMatches.length > 0) {
-                    scoredMatches.sort((a, b) => b.score - a.score); // Highest score first
-                    target = scoredMatches[0].el;
+                const effortRadios = Array.from(document.querySelectorAll('[role="menuitemradio"], [data-testid="model-selector-effort-option"]'))
+                                          .filter(el => el.offsetParent !== null);
+                const effortTarget = effortRadios.find(o => {
+                    const effAttr = o.getAttribute('data-effort') || o.querySelector('[data-effort]')?.getAttribute('data-effort');
+                    const txt = o.innerText?.trim().toLowerCase();
+                    return effAttr === effort || txt === effort;
+                });
+                
+                if (effortTarget) {
+                    effortTarget.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+                    effortTarget.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+                    effortTarget.click();
+                    await new Promise(r => setTimeout(r, 200));
+                    return { success: true, selected: baseModel + ' (' + effort + ')' };
                 }
             }
-
-            if (target) {
-                target.scrollIntoView({block: 'center'});
-                target.click();
-                await new Promise(r => setTimeout(r, 200));
-                return { success: true };
-            }
-
-            return { error: 'Model "${modelName}" not found in list. Visible: ' + visibleDialog.innerText.substring(0, 100) };
+            
+            targetItem.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+            targetItem.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+            targetItem.click();
+            await new Promise(r => setTimeout(r, 200));
+            return { success: true, selected: targetItem.innerText || baseModel };
         } catch(err) {
             return { error: 'JS Error: ' + err.toString() };
         }
@@ -1332,14 +1293,12 @@ async function setModel(cdp, modelName) {
             });
             if (res.result?.value) {
                 const val = res.result.value;
-                // Return immediately on success
                 if (val.success) return val;
-                // Keep first error as fallback
                 if (!bestResult) bestResult = val;
             }
         } catch (e) { }
     }
-    return bestResult || { error: 'Context failed' };
+    return bestResult || { error: 'Failed to switch model in all contexts' };
 }
 
 // Start New Chat - Click New Conversation button in cascade context or fallback to shortcuts
