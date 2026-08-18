@@ -1477,3 +1477,306 @@ textarea {
     border-radius: 4px;
     border: 1px solid rgba(59, 130, 246, 0.3);
 }
+
+
+/* ==========================================
+   ◆ New Chat & Workspace Modal / Drawer
+   ========================================== */
+.new-chat-layer {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.75);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    z-index: 1050;
+    display: flex;
+    align-items: flex-end;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.25s ease;
+}
+
+.new-chat-layer.show {
+    opacity: 1;
+    pointer-events: auto;
+}
+
+.new-chat-modal-content {
+    background: #18181b;
+    border-top: 1px solid #27272a;
+    border-radius: 20px 20px 0 0;
+    width: 100%;
+    max-height: 88vh;
+    display: flex;
+    flex-direction: column;
+    padding: 16px 16px env(safe-area-inset-bottom, 20px);
+    transform: translateY(100%);
+    transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+    box-shadow: 0 -10px 40px rgba(0, 0, 0, 0.6);
+}
+
+.new-chat-layer.show .new-chat-modal-content {
+    transform: translateY(0);
+}
+
+.modal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding-bottom: 12px;
+    border-bottom: 1px solid #27272a;
+}
+
+.modal-header-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.modal-header-title h2 {
+    font-size: 17px;
+    font-weight: 700;
+    color: #f4f4f5;
+    margin: 0;
+}
+
+.modal-close-btn {
+    background: #27272a;
+    color: #a1a1aa;
+    border-radius: 50%;
+    width: 32px;
+    height: 32px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: none;
+    cursor: pointer;
+}
+
+.modal-current-ws-card {
+    margin-top: 14px;
+    background: linear-gradient(135deg, rgba(34, 197, 94, 0.08) 0%, rgba(24, 24, 27, 0.6) 100%);
+    border: 1px solid rgba(34, 197, 94, 0.25);
+    border-radius: 12px;
+    padding: 12px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.ws-info {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.ws-label {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.8px;
+    color: #22c55e;
+}
+
+.ws-name {
+    font-size: 15px;
+    font-weight: 600;
+    color: #fafafa;
+}
+
+.ws-quick-btn {
+    background: #22c55e;
+    color: #09090b;
+    border: none;
+    border-radius: 8px;
+    padding: 10px 14px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    transition: background 0.15s ease;
+}
+
+.ws-quick-btn:active {
+    background: #16a34a;
+}
+
+.ws-tabs {
+    display: flex;
+    gap: 8px;
+    margin-top: 14px;
+    background: #27272a;
+    padding: 3px;
+    border-radius: 10px;
+}
+
+.ws-tab {
+    flex: 1;
+    background: transparent;
+    border: none;
+    color: #a1a1aa;
+    padding: 8px 12px;
+    font-size: 12px;
+    font-weight: 600;
+    border-radius: 7px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.ws-tab.active {
+    background: #3f3f46;
+    color: #fafafa;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+}
+
+.ws-tab-panel {
+    margin-top: 12px;
+}
+
+.ws-search-box {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: #27272a;
+    border: 1px solid #3f3f46;
+    border-radius: 8px;
+    padding: 8px 12px;
+    margin-bottom: 10px;
+}
+
+.ws-search-box input {
+    background: transparent;
+    border: none;
+    outline: none;
+    color: #fafafa;
+    font-size: 13px;
+    width: 100%;
+}
+
+.ws-folders-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    overflow-y: auto;
+    max-height: 36vh;
+    padding-bottom: 8px;
+}
+
+.ws-folder-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    background: #202023;
+    border: 1px solid #2e2e32;
+    border-radius: 10px;
+    padding: 10px 12px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.ws-folder-item:active {
+    background: #27272a;
+    border-color: #22c55e;
+}
+
+.ws-item-left {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+}
+
+.ws-item-icon {
+    font-size: 18px;
+    flex-shrink: 0;
+}
+
+.ws-item-details {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+
+.ws-item-name {
+    font-size: 13px;
+    font-weight: 600;
+    color: #f4f4f5;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.ws-item-path {
+    font-size: 11px;
+    color: #71717a;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.ws-select-tag {
+    font-size: 11px;
+    font-weight: 600;
+    color: #22c55e;
+    background: rgba(34, 197, 94, 0.12);
+    padding: 4px 8px;
+    border-radius: 6px;
+    flex-shrink: 0;
+}
+
+.ws-create-form {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 10px 4px;
+}
+
+.ws-create-form label {
+    font-size: 12px;
+    font-weight: 600;
+    color: #a1a1aa;
+}
+
+.ws-create-form input {
+    background: #27272a;
+    border: 1px solid #3f3f46;
+    border-radius: 8px;
+    padding: 10px 12px;
+    color: #fafafa;
+    font-size: 14px;
+    outline: none;
+}
+
+.ws-create-form input:focus {
+    border-color: #22c55e;
+}
+
+.ws-create-hint {
+    font-size: 11px;
+    color: #71717a;
+}
+
+.ws-create-hint code {
+    color: #a1a1aa;
+    background: #27272a;
+    padding: 2px 4px;
+    border-radius: 4px;
+}
+
+.ws-create-submit-btn {
+    background: #22c55e;
+    color: #09090b;
+    border: none;
+    border-radius: 8px;
+    padding: 12px 16px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    margin-top: 6px;
+}
+
+.ws-create-submit-btn:active {
+    background: #16a34a;
+}

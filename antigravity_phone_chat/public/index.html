@@ -41,7 +41,7 @@
     <!-- Control Panel -->
     <div class="gr-control-panel" id="controlPanel">
         <div class="gr-btn-group">
-            <button class="new-chat-btn" id="newChatBtn" aria-label="New Chat" title="Start New Conversation">
+            <button class="new-chat-btn" id="newChatBtn" onclick="showNewChatModal()" aria-label="New Chat" title="Start New Conversation & Choose Workspace">
                 <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5">
                     <path d="M12 5v14M5 12h14" />
                 </svg>
@@ -240,6 +240,71 @@
                 <div class="restart-step-item" id="stepLaunch">2. Launching Antigravity IDE</div>
                 <div class="restart-step-item" id="stepDiscover">3. Discovering DevTools port 9222</div>
                 <div class="restart-step-item" id="stepConnect">4. Re-establishing agent bridge</div>
+            </div>
+        </div>
+    </div>
+
+    
+    <!-- New Chat & Workspace Modal / Drawer -->
+    <div class="new-chat-layer" id="newChatLayer" onclick="if(event.target === this) hideNewChatModal()">
+        <div class="new-chat-modal-content">
+            <div class="modal-header">
+                <div class="modal-header-title">
+                    <span class="modal-header-icon">✨</span>
+                    <h2>New Conversation</h2>
+                </div>
+                <button class="icon-btn modal-close-btn" onclick="hideNewChatModal()" aria-label="Close" title="Close">
+                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.5">
+                        <line x1="18" y1="6" x2="6" y2="18"></line>
+                        <line x1="6" y1="6" x2="18" y2="18"></line>
+                    </svg>
+                </button>
+            </div>
+
+            <!-- Current Workspace Quick Action -->
+            <div class="modal-current-ws-card">
+                <div class="ws-info">
+                    <span class="ws-label">ACTIVE WORKSPACE</span>
+                    <div class="ws-name" id="currentWsName">📁 news</div>
+                </div>
+                <button class="ws-quick-btn" onclick="confirmStartNewChat(null)" id="startInCurrentBtn">
+                    <span>⚡ Start in Current Folder</span>
+                </button>
+            </div>
+
+            <!-- Tabs: Choose Existing vs Create New -->
+            <div class="ws-tabs">
+                <button class="ws-tab active" id="tabChooseWs" onclick="switchWsTab('choose')">📁 Choose Project</button>
+                <button class="ws-tab" id="tabCreateWs" onclick="switchWsTab('create')">＋ New Project Folder</button>
+            </div>
+
+            <!-- Tab 1: Choose Existing Folder -->
+            <div class="ws-tab-panel" id="panelChooseWs">
+                <div class="ws-search-box">
+                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                        <circle cx="11" cy="11" r="8" />
+                        <path d="M21 21l-4.35-4.35" />
+                    </svg>
+                    <input type="text" id="wsSearchInput" placeholder="Filter project folders..." oninput="filterWorkspaces(this.value)" autocomplete="off" />
+                </div>
+                <div class="ws-folders-list" id="wsFoldersList">
+                    <div style="padding: 20px; text-align: center; color: var(--text-muted);">
+                        <div class="loading-spinner" style="margin: 0 auto 8px;"></div>
+                        <div>Loading projects...</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Tab 2: Create New Folder -->
+            <div class="ws-tab-panel" id="panelCreateWs" style="display: none;">
+                <div class="ws-create-form">
+                    <label for="newFolderNameInput">Folder / Project Name</label>
+                    <input type="text" id="newFolderNameInput" placeholder="e.g. my-awesome-app, tajweed-pipeline" autocomplete="off" />
+                    <div class="ws-create-hint">Location: <code id="createParentPath">/home/absolut7/Documents/</code></div>
+                    <button class="ws-create-submit-btn" onclick="createAndStartInNewFolder()">
+                        ＋ Create Folder & Start Chat
+                    </button>
+                </div>
             </div>
         </div>
     </div>

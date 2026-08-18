@@ -837,8 +837,176 @@ async function sendMessage({ forceQueue = false, forceSend = false } = {}) {
 if (sendBtn) sendBtn.addEventListener('click', () => sendMessage({ forceSend: false }));
 if (queueBtn) queueBtn.addEventListener('click', () => sendMessage({ forceQueue: true }));
 
+
+// --- Workspace & New Chat Modal Logic ---
+let cachedWorkspaces = [];
+let activeWsTab = 'choose';
+
+const newChatLayer = document.getElementById('newChatLayer');
+const wsFoldersList = document.getElementById('wsFoldersList');
+const currentWsName = document.getElementById('currentWsName');
+const newFolderNameInput = document.getElementById('newFolderNameInput');
+
+window.showNewChatModal = showNewChatModal;
+window.hideNewChatModal = hideNewChatModal;
+window.switchWsTab = switchWsTab;
+window.filterWorkspaces = filterWorkspaces;
+window.createAndStartInNewFolder = createAndStartInNewFolder;
+window.confirmStartNewChat = confirmStartNewChat;
+
+async function showNewChatModal() {
+    if (newChatLayer) newChatLayer.classList.add('show');
+    fetchWorkspaces();
+}
+
+function hideNewChatModal() {
+    if (newChatLayer) newChatLayer.classList.remove('show');
+}
+
+function switchWsTab(tab) {
+    activeWsTab = tab;
+    const tabChoose = document.getElementById('tabChooseWs');
+    const tabCreate = document.getElementById('tabCreateWs');
+    const panelChoose = document.getElementById('panelChooseWs');
+    const panelCreate = document.getElementById('panelCreateWs');
+
+    if (tab === 'choose') {
+        if (tabChoose) tabChoose.classList.add('active');
+        if (tabCreate) tabCreate.classList.remove('active');
+        if (panelChoose) panelChoose.style.display = 'block';
+        if (panelCreate) panelCreate.style.display = 'none';
+    } else {
+        if (tabCreate) tabCreate.classList.add('active');
+        if (tabChoose) tabChoose.classList.remove('active');
+        if (panelCreate) panelCreate.style.display = 'block';
+        if (panelChoose) panelChoose.style.display = 'none';
+        if (newFolderNameInput) newFolderNameInput.focus();
+    }
+}
+
+async function fetchWorkspaces() {
+    try {
+        const res = await fetchWithAuth('/api/workspaces');
+        const data = await res.json();
+        if (data.success) {
+            cachedWorkspaces = data.workspaces || [];
+            if (currentWsName && data.currentWorkspace) {
+                currentWsName.textContent = '📁 ' + (data.currentWorkspace.name || data.currentWorkspace);
+            }
+            renderWorkspacesList(cachedWorkspaces);
+        }
+    } catch (e) {
+        console.error('Failed to fetch workspaces:', e);
+    }
+}
+
+function renderWorkspacesList(workspaces) {
+    if (!wsFoldersList) return;
+    if (workspaces.length === 0) {
+        wsFoldersList.innerHTML = '<div style="padding: 24px; text-align: center; color: var(--text-muted);"><div>📁</div><div>No matching folders found</div></div>';
+        return;
+    }
+
+    wsFoldersList.innerHTML = workspaces.map(ws => `
+        <div class="ws-folder-item" onclick="confirmStartNewChat('${escapeHtml(ws.path)}')">
+            <div class="ws-item-left">
+                <div class="ws-item-icon">📁</div>
+                <div class="ws-item-details">
+                    <div class="ws-item-name">${escapeHtml(ws.name)}</div>
+                    <div class="ws-item-path">${escapeHtml(ws.path)}</div>
+                </div>
+            </div>
+            <div class="ws-item-action">
+                <span class="ws-select-tag">Select</span>
+            </div>
+        </div>
+    `).join('');
+}
+
+function filterWorkspaces(query) {
+    const q = (query || '').toLowerCase().trim();
+    if (!q) {
+        renderWorkspacesList(cachedWorkspaces);
+        return;
+    }
+    const filtered = cachedWorkspaces.filter(ws =>
+        (ws.name || '').toLowerCase().includes(q) || (ws.path || '').toLowerCase().includes(q)
+    );
+    renderWorkspacesList(filtered);
+}
+
+async function createAndStartInNewFolder() {
+    const name = (newFolderNameInput?.value || '').trim();
+    if (!name) {
+        showToast('Please enter a folder name');
+        return;
+    }
+    hideNewChatModal();
+    await confirmStartNewChat(null, name);
+}
+
+async function confirmStartNewChat(folderPath, newFolderName) {
+    hideNewChatModal();
+    hideChatHistory();
+
+    // Reset local inputs & attachments to prevent text contamination
+    if (messageInput) {
+        messageInput.value = '';
+        messageInput.style.height = 'auto';
+    }
+    attachedFiles = [];
+    if (typeof renderAttachPreview === 'function') renderAttachPreview();
+
+    if (newChatBtn) {
+        newChatBtn.style.opacity = '0.5';
+        newChatBtn.style.pointerEvents = 'none';
+    }
+    showToast(folderPath || newFolderName ? '📂 Switching folder & starting chat...' : '✨ Starting new conversation...');
+
+    currentChatTitle = 'New Conversation';
+    if (activeChatTitle) activeChatTitle.textContent = 'New Conversation';
+
+    chatContent.innerHTML = `
+        <div class="loading-state">
+            <div class="loading-spinner"></div>
+            <p>${folderPath || newFolderName ? 'Opening workspace folder...' : 'Creating fresh session...'}</p>
+        </div>
+    `;
+
+    try {
+        const body = {};
+        if (folderPath) body.folderPath = folderPath;
+        if (newFolderName) body.newFolderName = newFolderName;
+
+        const res = await fetchWithAuth('/new-chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body)
+        });
+        const data = await res.json();
+
+        if (data.success) {
+            showToast('✅ New conversation ready');
+            setTimeout(loadSnapshot, 500);
+            setTimeout(loadSnapshot, 1400);
+            setTimeout(checkChatStatus, 1800);
+        } else {
+            showToast('Failed to start new chat: ' + (data.error || 'Unknown'));
+        }
+    } catch (e) {
+        showToast('New chat error: ' + e.message);
+    } finally {
+        if (newChatBtn) {
+            newChatBtn.style.opacity = '1';
+            newChatBtn.style.pointerEvents = 'auto';
+        }
+        if (messageInput) messageInput.focus();
+    }
+}
+
 // --- New Chat Logic ---
-async function startNewChat() {
+async function startNewChat() { return confirmStartNewChat(null); }
+async function old_startNewChat() {
     newChatBtn.style.opacity = '0.5';
     newChatBtn.style.pointerEvents = 'none';
     showToast('✨ Starting new conversation...');
@@ -877,9 +1045,9 @@ async function startNewChat() {
 
 
 
-if (newChatBtn) newChatBtn.addEventListener('click', startNewChat);
+if (newChatBtn) newChatBtn.addEventListener('click', showNewChatModal);
 
-function startNewChatFromHistory() { hideChatHistory(); startNewChat(); }
+function startNewChatFromHistory() { hideChatHistory(); showNewChatModal(); }
 function hideChatHistory() { if (historyLayer) historyLayer.classList.remove('show'); }
 
 // --- Chat History Logic ---

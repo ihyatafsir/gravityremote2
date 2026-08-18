@@ -765,7 +765,7 @@ async function _injectMessageInner(cdp, text) {
         } catch (e) { }
     }
 
-    // 3. Focus editor and clear previous text
+    // 3. Focus editor and thoroughly clear previous text (multi-layer clean)
     const focusParams = {
         expression: `(() => {
             let editor = document.querySelector('div[contenteditable="true"][role="combobox"]') ||
@@ -783,14 +783,15 @@ async function _injectMessageInner(cdp, text) {
             }
             if (!editor) return { ok: false, error: "editor_not_found" };
             editor.focus();
-            const sel = window.getSelection();
-            if (sel) {
-                sel.removeAllRanges();
-                const range = document.createRange();
-                range.selectNodeContents(editor);
-                sel.addRange(range);
-            }
-            document.execCommand("delete");
+            try {
+                const sel = window.getSelection();
+                if (sel) {
+                    sel.removeAllRanges();
+                    const range = document.createRange();
+                    range.selectNodeContents(editor);
+                    sel.addRange(range);
+                }
+            } catch(e) {}
             return { ok: true };
         })()`,
         returnByValue: true
@@ -807,7 +808,25 @@ async function _injectMessageInner(cdp, text) {
             return { ok: false, error: focusResult.result.value.error || "focus_failed" };
         }
 
-        await new Promise(r => setTimeout(r, 100));
+        // Native CDP Clear: Ctrl+A -> Backspace -> Delete
+        await cdp.call("Input.dispatchKeyEvent", {
+            type: "keyDown", key: "a", code: "KeyA",
+            modifiers: 2, windowsVirtualKeyCode: 65, nativeVirtualKeyCode: 65
+        });
+        await cdp.call("Input.dispatchKeyEvent", {
+            type: "keyUp", key: "a", code: "KeyA",
+            modifiers: 2, windowsVirtualKeyCode: 65, nativeVirtualKeyCode: 65
+        });
+        await cdp.call("Input.dispatchKeyEvent", {
+            type: "keyDown", key: "Backspace", code: "Backspace",
+            windowsVirtualKeyCode: 8, nativeVirtualKeyCode: 8
+        });
+        await cdp.call("Input.dispatchKeyEvent", {
+            type: "keyUp", key: "Backspace", code: "Backspace",
+            windowsVirtualKeyCode: 8, nativeVirtualKeyCode: 8
+        });
+
+        await new Promise(r => setTimeout(r, 60));
 
         // Insert text via CDP native typing
         await cdp.call("Input.insertText", { text });
@@ -2052,6 +2071,111 @@ async function startBackgroundLoop(wss) {
     startQueueDrainLoop();
 }
 
+
+// --- Workspace Management ---
+function getAvailableWorkspaces() {
+    const baseDocs = "/home/absolut7/Documents";
+    const workspaces = [];
+    const seenPaths = new Set();
+
+    // 1. Scan ~/Documents direct subfolders
+    try {
+        if (fs.existsSync(baseDocs)) {
+            const entries = fs.readdirSync(baseDocs, { withFileTypes: true });
+            for (const ent of entries) {
+                if (ent.isDirectory() && !ent.name.startsWith(".") && ent.name !== "node_modules") {
+                    const fullPath = join(baseDocs, ent.name);
+                    seenPaths.add(fullPath);
+                    let mtime = 0;
+                    try { mtime = fs.statSync(fullPath).mtimeMs; } catch (e) {}
+                    workspaces.push({
+                        name: ent.name,
+                        shortName: ent.name,
+                        path: fullPath,
+                        group: "Documents",
+                        mtime
+                    });
+                }
+            }
+        }
+    } catch (e) {}
+
+    // 2. Scan ~/Documents/26apps subfolders
+    const apps26 = join(baseDocs, "26apps");
+    try {
+        if (fs.existsSync(apps26)) {
+            const entries = fs.readdirSync(apps26, { withFileTypes: true });
+            for (const ent of entries) {
+                if (ent.isDirectory() && !ent.name.startsWith(".") && ent.name !== "node_modules") {
+                    const fullPath = join(apps26, ent.name);
+                    if (!seenPaths.has(fullPath)) {
+                        seenPaths.add(fullPath);
+                        let mtime = 0;
+                        try { mtime = fs.statSync(fullPath).mtimeMs; } catch (e) {}
+                        workspaces.push({
+                            name: "26apps / " + ent.name,
+                            shortName: ent.name,
+                            path: fullPath,
+                            group: "26apps",
+                            mtime
+                        });
+                    }
+                }
+            }
+        }
+    } catch (e) {}
+
+    // Sort by modification time (most recent first)
+    workspaces.sort((a, b) => b.mtime - a.mtime);
+
+    // Current workspace detection
+    let currentWorkspace = { name: "news", path: "/home/absolut7/Documents/news" };
+    try {
+        if (lastSnapshot && lastSnapshot.workspaceTitle) {
+            const match = workspaces.find(w => w.name.toLowerCase() === lastSnapshot.workspaceTitle.toLowerCase() || (w.shortName && w.shortName.toLowerCase() === lastSnapshot.workspaceTitle.toLowerCase()) || lastSnapshot.workspaceTitle.toLowerCase().includes(w.name.toLowerCase()));
+            if (match) currentWorkspace = match;
+            else currentWorkspace = { name: lastSnapshot.workspaceTitle, path: join(baseDocs, lastSnapshot.workspaceTitle) };
+        }
+    } catch (e) {}
+
+    return {
+        currentWorkspace,
+        parentDir: baseDocs,
+        workspaces
+    };
+}
+
+async function openWorkspaceFolder(folderPath) {
+    if (!folderPath) return { error: "Folder path required" };
+    const baseDocs = "/home/absolut7/Documents";
+    const resolvedPath = folderPath.startsWith("/") ? folderPath : join(baseDocs, folderPath);
+    if (!fs.existsSync(resolvedPath)) {
+        fs.mkdirSync(resolvedPath, { recursive: true });
+    }
+
+    console.log("[WORKSPACE] 📂 Opening folder:", resolvedPath);
+    try {
+        const { exec } = require("child_process");
+        exec(`/home/absolut7/.local/share/antigravity/bin/antigravity -r "${resolvedPath}"`, (err) => {
+            if (err) console.warn("[WORKSPACE] antigravity -r:", err.message);
+        });
+    } catch (e) {
+        console.error("[WORKSPACE] Failed to open folder:", e.message);
+    }
+
+    await new Promise(r => setTimeout(r, 1800));
+    cachedSnapshotCtxId = null;
+    cachedCascadeCtxId = null;
+    observerInjected = false;
+    await ensureCDP();
+
+    return {
+        success: true,
+        path: resolvedPath,
+        name: basename(resolvedPath)
+    };
+}
+
 // Create Express app
 async function createServer() {
     const app = express();
@@ -2909,8 +3033,51 @@ async function main() {
             res.json(result);
         });
 
-        // Start New Chat
+        // Workspace APIs
+        app.get('/api/workspaces', (req, res) => {
+            const data = getAvailableWorkspaces();
+            res.json({ success: true, ...data });
+        });
+
+        app.post('/api/workspaces/create', (req, res) => {
+            const { folderName, parentPath } = req.body;
+            if (!folderName) return res.status(400).json({ error: 'Folder name is required' });
+            const baseDir = parentPath || '/home/absolut7/Documents';
+            const cleanName = folderName.replace(/[^a-zA-Z0-9_-]/g, '_');
+            const targetPath = join(baseDir, cleanName);
+            try {
+                if (!fs.existsSync(targetPath)) {
+                    fs.mkdirSync(targetPath, { recursive: true });
+                }
+                res.json({ success: true, path: targetPath, name: cleanName });
+            } catch (e) {
+                res.status(500).json({ error: e.message });
+            }
+        });
+
+        app.post('/api/workspaces/open', async (req, res) => {
+            const { path: folderPath, startChat } = req.body;
+            if (!folderPath) return res.status(400).json({ error: 'Path is required' });
+            const wsRes = await openWorkspaceFolder(folderPath);
+            if (startChat && cdpConnection) {
+                await new Promise(r => setTimeout(r, 600));
+                await startNewChat(cdpConnection);
+            }
+            res.json(wsRes);
+        });
+
+        // Start New Chat (with optional workspace / folder switching)
         app.post('/new-chat', async (req, res) => {
+            const { folderPath, newFolderName } = req.body || {};
+
+            // If a new folder or workspace folder was chosen, switch to it first
+            if (newFolderName) {
+                const targetPath = join('/home/absolut7/Documents', newFolderName.replace(/[^a-zA-Z0-9_-]/g, '_'));
+                await openWorkspaceFolder(targetPath);
+            } else if (folderPath) {
+                await openWorkspaceFolder(folderPath);
+            }
+
             if (!cdpConnection && !(await ensureCDP())) return res.status(503).json({ error: 'CDP disconnected' });
             const result = await startNewChat(cdpConnection);
 
