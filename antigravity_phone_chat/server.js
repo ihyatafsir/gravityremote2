@@ -850,17 +850,16 @@ async function _injectMessageInner(cdp, text) {
 
         await new Promise(r => setTimeout(r, 100));
 
-        const clickParams = {
+                const clickParams = {
             expression: `(async () => {
                 let submit = null;
-                for (let retry = 0; retry < 5; retry++) {
+                for (let retry = 0; retry < 6; retry++) {
                     submit = document.querySelector('[data-tooltip-id="input-send-button-send-tooltip"]') ||
                              document.querySelector('[data-tooltip-id="input-send-button-pending-tooltip"]') ||
                              document.querySelector('[data-tooltip-id*="queue" i]') ||
                              document.querySelector('button[aria-label*="Queue" i]') ||
                              document.querySelector('button[aria-label*="Interrupt" i]') ||
                              document.querySelector('button[aria-label^="Send" i]') ||
-                             document.querySelector('button[aria-label*="Queue" i]') ||
                              document.querySelector('button svg.lucide-arrow-right')?.closest('button') ||
                              document.querySelector('button svg.lucide-corner-down-left')?.closest('button');
                     if (submit && !submit.disabled && submit.offsetParent !== null) break;
@@ -874,7 +873,36 @@ async function _injectMessageInner(cdp, text) {
                     } catch(e) {}
                     return { ok: true, method: "button_click" };
                 }
-                return { ok: true, method: "enter_key_submit" };
+
+                // Verify whether Enter key actually submitted and cleared the input
+                await new Promise(r => setTimeout(r, 150));
+                const editor = document.querySelector('div[contenteditable="true"][role="combobox"]') ||
+                               document.querySelector('div[contenteditable="true"][aria-label="Message input"]') ||
+                               document.querySelector('[data-lexical-editor="true"][contenteditable="true"]') ||
+                               document.querySelector('div[contenteditable="true"][role="textbox"]') ||
+                               document.querySelector('div[contenteditable="true"]');
+
+                const isStopPresent = !!(document.querySelector('[data-tooltip-id="input-send-button-cancel-tooltip"]') ||
+                                         document.querySelector('button[aria-label*="Cancel" i]') ||
+                                         document.querySelector('button[aria-label*="Stop" i]') ||
+                                         document.querySelector('button[title*="Cancel" i]') ||
+                                         document.querySelector('button[title*="Stop" i]') ||
+                                         document.querySelector('button svg.lucide-square'));
+
+                const textRemaining = editor ? (editor.innerText || editor.textContent || "").trim() : "";
+
+                // If editor is empty, submission was accepted!
+                if (!textRemaining) {
+                    return { ok: true, method: "enter_key_submit" };
+                }
+
+                // If editor still holds text or agent is busy/locked, submission was blocked
+                return {
+                    ok: false,
+                    reason: isStopPresent ? "busy" : "submit_unresponsive",
+                    error: isStopPresent ? "Agent is currently busy running a task" : "Editor did not submit on Enter",
+                    textRemaining: textRemaining.substring(0, 50)
+                };
             })()`,
             returnByValue: true,
             awaitPromise: true
@@ -886,9 +914,9 @@ async function _injectMessageInner(cdp, text) {
             new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 3000))
         ]);
 
-        return clickResult.result?.value || { ok: true, method: "submitted" };
+        return clickResult.result?.value || { ok: false, reason: "eval_failed", error: "Evaluation returned empty" };
     } catch (e) {
-        return { ok: true, method: "enter_fallback" };
+        return { ok: false, reason: "exception", error: e.message };
     }
 }
 
