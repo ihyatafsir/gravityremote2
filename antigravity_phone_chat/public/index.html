@@ -12,7 +12,7 @@
     <link
         href="https://fonts.googleapis.com/css2?family=Amiri:ital,wght@0,400;0,700;1,400&family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
         rel="stylesheet">
-    <link rel="stylesheet" href="css/style.css?v=2.9">
+    <link rel="stylesheet" href="css/style.css?v=5.0_1787521561">
     <link rel="icon"
         href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>⚡</text></svg>">
 </head>
@@ -187,6 +187,59 @@
             <div style="margin-top:20px; text-align:center;">
                 <button onclick="closeModal()"
                     style="background:transparent; border:none; color:var(--text-muted); padding:10px; font-size:14px; cursor:pointer;">Cancel</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 📄 Sovereign Mobile File Viewer / Slide-Over Window -->
+        <!-- Sovereign Mobile File Viewer / Slide-Over Window -->
+    <div class="file-viewer-overlay" id="fileViewerOverlay" onclick="handleFileOverlayClick(event)">
+        <div class="file-viewer-drawer" id="fileViewerDrawer">
+            <!-- Drag Pull Handle -->
+            <div class="file-viewer-handle-bar" onclick="closeMobileFileViewer()">
+                <div class="file-viewer-handle"></div>
+            </div>
+
+            <!-- Drawer Header -->
+            <div class="file-viewer-header">
+                <div class="file-viewer-title-group">
+                    <div class="file-viewer-icon" id="fileViewerIcon">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line></svg>
+                    </div>
+                    <div class="file-viewer-title-text">
+                        <div class="file-viewer-filename" id="fileViewerFilename">Document Preview</div>
+                        <div class="file-viewer-meta">
+                            <span class="file-viewer-badge" id="fileViewerSizeBadge">0 KB</span>
+                            <span class="file-viewer-badge file-viewer-badge-type" id="fileViewerTypeBadge">MARKDOWN</span>
+                            <span class="file-viewer-path-preview" id="fileViewerPathPreview"></span>
+                        </div>
+                    </div>
+                </div>
+                <div class="file-viewer-actions">
+                    <a id="fileDownloadBtn" class="file-action-btn file-action-download" href="#" download title="Download File">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+                        <span>Download</span>
+                    </a>
+                    <a id="fileRawBtn" class="file-action-btn file-action-raw" href="#" target="_blank" title="Open Raw in New Tab">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>
+                        <span>Open Tab</span>
+                    </a>
+                    <button id="fileCopyBtn" class="file-action-btn file-action-copy" onclick="copyFileViewerContent()" title="Copy Full Text">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                        <span>Copy</span>
+                    </button>
+                    <button class="file-action-btn file-action-close" onclick="closeMobileFileViewer()" title="Close Viewer">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                    </button>
+                </div>
+            </div>
+
+            <!-- Drawer Content Body -->
+            <div class="file-viewer-body" id="fileViewerBody">
+                <div class="file-viewer-loading">
+                    <div class="loading-spinner"></div>
+                    <p>Loading file...</p>
+                </div>
             </div>
         </div>
     </div>
@@ -599,7 +652,7 @@
 
         if (lisanSentences.length > 0) { initLisanStream(); }
     </script>
-    <script src="js/app.js?v=2.9"></script>
+    <script src="js/app.js?v=5.0_1787521561"></script>
 </body>
 
 </html>

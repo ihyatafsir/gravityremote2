@@ -2174,7 +2174,15 @@ async function createServer() {
         return next();
     });
 
-    app.use(express.static(join(__dirname, 'public')));
+    app.use(express.static(join(__dirname, 'public'), {
+        etag: false,
+        lastModified: false,
+        setHeaders: (res) => {
+            res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+            res.setHeader('Pragma', 'no-cache');
+            res.setHeader('Expires', '0');
+        }
+    }));
 
     // Login endpoint
     app.post('/login', (req, res) => {
@@ -3079,6 +3087,176 @@ async function main() {
             if (!cdpConnection) return res.json({ hasChat: false, hasMessages: false, editorFound: false });
             const result = await hasChatOpen(cdpConnection);
             res.json(result);
+        });
+
+        // ==========================================
+        // 📄 Sovereign Mobile File Viewer & Downloader APIs
+        // ==========================================
+        function resolveFilePath(inputPath) {
+            if (!inputPath || typeof inputPath !== 'string') return null;
+            let cleanPath = decodeURIComponent(inputPath).trim();
+            if (cleanPath.startsWith('file://')) {
+                cleanPath = cleanPath.replace(/^file:\/\//, '');
+            }
+            cleanPath = cleanPath.split('#')[0].trim();
+
+            // 1. Absolute path check
+            if (cleanPath.startsWith('/') && fs.existsSync(cleanPath)) {
+                try {
+                    if (fs.statSync(cleanPath).isFile()) return cleanPath;
+                } catch(e) {}
+            }
+
+            // 2. Relative check against candidate roots
+            const candidateRoots = [
+                process.cwd(),
+                '/home/absolut7/Documents/news/wyresup-mesh-app',
+                '/home/absolut7/Documents/26apps/gravityremote2',
+                '/home/absolut7/.gemini/antigravity-ide/brain',
+                '/home/absolut7/Documents',
+                os.homedir()
+            ];
+
+            for (const root of candidateRoots) {
+                const full = join(root, cleanPath);
+                if (fs.existsSync(full)) {
+                    try {
+                        if (fs.statSync(full).isFile()) return full;
+                    } catch(e) {}
+                }
+            }
+
+            // 3. Search by basename across candidate roots
+            const targetBase = basename(cleanPath);
+            if (targetBase) {
+                for (const root of candidateRoots) {
+                    try {
+                        const found = searchFileShallow(root, targetBase, 3);
+                        if (found) return found;
+                    } catch (e) {}
+                }
+            }
+
+            return null;
+        }
+
+        function searchFileShallow(dir, targetName, maxDepth = 3) {
+            if (maxDepth < 0 || !fs.existsSync(dir)) return null;
+            try {
+                const entries = fs.readdirSync(dir, { withFileTypes: true });
+                for (const entry of entries) {
+                    if (entry.name.startsWith('.') && entry.name !== '.gemini') continue;
+                    if (entry.name === 'node_modules') continue;
+                    const fullPath = join(dir, entry.name);
+                    if (entry.isFile() && entry.name === targetName) {
+                        return fullPath;
+                    }
+                }
+                for (const entry of entries) {
+                    if (entry.name.startsWith('.') && entry.name !== '.gemini') continue;
+                    if (entry.name === 'node_modules') continue;
+                    if (entry.isDirectory()) {
+                        const res = searchFileShallow(join(dir, entry.name), targetName, maxDepth - 1);
+                        if (res) return res;
+                    }
+                }
+            } catch (e) {}
+            return null;
+        }
+
+        // View File (JSON with content, markdown flags, dataUrl for images)
+        app.get('/api/file/view', (req, res) => {
+            const rawPath = req.query.path || req.query.file;
+            if (!rawPath) return res.status(400).json({ error: 'File path required' });
+
+            const resolved = resolveFilePath(rawPath);
+            if (!resolved) {
+                return res.status(404).json({ error: `File not found: ${rawPath}` });
+            }
+
+            try {
+                const stat = fs.statSync(resolved);
+                const name = basename(resolved);
+                const ext = name.split('.').pop().toLowerCase();
+                const isMarkdown = ['md', 'markdown', 'mdown'].includes(ext);
+                const isImage = ['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'bmp', 'ico'].includes(ext);
+                const isCode = ['js', 'ts', 'jsx', 'tsx', 'py', 'json', 'html', 'css', 'sh', 'bash', 'yaml', 'yml', 'toml', 'xml', 'c', 'cpp', 'rs', 'go', 'java', 'sql', 'log', 'txt'].includes(ext);
+
+                if (isImage) {
+                    const buf = fs.readFileSync(resolved);
+                    const b64 = buf.toString('base64');
+                    const mime = ext === 'svg' ? 'image/svg+xml' : `image/${ext === 'jpg' ? 'jpeg' : ext}`;
+                    return res.json({
+                        success: true,
+                        name,
+                        path: resolved,
+                        size: stat.size,
+                        isImage: true,
+                        isMarkdown: false,
+                        isCode: false,
+                        dataUrl: `data:${mime};base64,${b64}`
+                    });
+                }
+
+                // If large file (> 2MB text), return truncated preview note
+                if (stat.size > 2 * 1024 * 1024) {
+                    const fd = fs.openSync(resolved, 'r');
+                    const buf = Buffer.alloc(512 * 1024);
+                    fs.readSync(fd, buf, 0, buf.length, 0);
+                    fs.closeSync(fd);
+                    return res.json({
+                        success: true,
+                        name,
+                        path: resolved,
+                        size: stat.size,
+                        isImage: false,
+                        isMarkdown,
+                        isCode,
+                        isTruncated: true,
+                        content: buf.toString('utf8') + '\n\n... [Truncated for Mobile Preview. Use Download button to get full file] ...'
+                    });
+                }
+
+                const content = fs.readFileSync(resolved, 'utf8');
+                return res.json({
+                    success: true,
+                    name,
+                    path: resolved,
+                    size: stat.size,
+                    isImage: false,
+                    isMarkdown,
+                    isCode,
+                    content
+                });
+            } catch (err) {
+                return res.status(500).json({ error: `Failed to read file: ${err.message}` });
+            }
+        });
+
+        // Raw File (Direct stream for Open in New Tab)
+        app.get('/api/file/raw', (req, res) => {
+            const rawPath = req.query.path || req.query.file;
+            if (!rawPath) return res.status(400).send('File path required');
+            const resolved = resolveFilePath(rawPath);
+            if (!resolved) return res.status(404).send(`File not found: ${rawPath}`);
+
+            const ext = basename(resolved).split('.').pop().toLowerCase();
+            if (['md', 'markdown'].includes(ext)) {
+                res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
+            } else if (['js', 'json', 'py', 'sh', 'txt', 'html', 'css', 'log'].includes(ext)) {
+                res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+            }
+            res.sendFile(resolved);
+        });
+
+        // Download File (Forces browser download on mobile)
+        app.get('/api/file/download', (req, res) => {
+            const rawPath = req.query.path || req.query.file;
+            if (!rawPath) return res.status(400).send('File path required');
+            const resolved = resolveFilePath(rawPath);
+            if (!resolved) return res.status(404).send(`File not found: ${rawPath}`);
+            const name = basename(resolved);
+            res.download(resolved, name);
         });
 
         // Kill any existing process on the port before starting

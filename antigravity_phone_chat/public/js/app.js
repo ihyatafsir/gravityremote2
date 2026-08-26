@@ -1640,71 +1640,106 @@ setInterval(fetchAppState, 5000);
 checkChatStatus();
 prefetchHistory();
 
-// --- Interactive Expandable Tool Tabs, Thoughts & Artifact Cards ---
+// --- Interactive Expandable Tool Tabs, Thoughts & Sovereign File Viewer ---
 if (chatContent) {
     chatContent.addEventListener('click', async (e) => {
-        // 1. Locate interactive trigger container
-        const thoughtBtn = e.target.closest('button:has(span.text-secondary-foreground), button.tabular-nums, button:has(svg), div.relative > button');
-        const workedForBtn = e.target.closest('button[data-testid="worked-for-collapsible"], button[class*="tabular-nums"]');
-        const artifactCard = e.target.closest('.artifact-card, div.border.rounded-xl, div:has(> button[draggable="true"])');
-        const toolRow = e.target.closest('div.group.cursor-pointer, div[role="button"], button');
-
-        let targetEl = thoughtBtn || workedForBtn || artifactCard || toolRow;
-
-        // If not found directly, check text content of target or its closest ancestors
-        if (!targetEl) {
-            const candidate = e.target.closest('div, span, p, button');
-            if (candidate) {
-                const txt = (candidate.innerText || candidate.textContent || '').trim();
-                if (/^(Thought|Thinking|Worked for|Ran\b|Explored\b|Running\b)/i.test(txt)) {
-                    targetEl = candidate;
+        try {
+            // 1. Check for File Link / Artifact Card / Markdown / Code file click
+            let candidateFilePath = '';
+            
+            // Check direct <a> tag
+            const anchor = e.target.closest('a');
+            if (anchor) {
+                const href = anchor.getAttribute('href') || '';
+                if (href.includes('/api/file/raw') || href.includes('/api/file/download') || href.startsWith('file://') || href.match(/\.(md|markdown|txt|js|ts|py|json|sh|log|pdf|png|jpg)(\?|#|$)/i)) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    let targetPath = href;
+                    try {
+                        const urlParams = new URL(href, window.location.origin);
+                        targetPath = urlParams.searchParams.get('path') || href;
+                    } catch(uErr) {}
+                    openMobileFileViewer(targetPath);
+                    return;
                 }
             }
-        }
 
-        if (!targetEl) return;
+            // Check if clicking inside an artifact card or code pill or element with filename
+            let current = e.target;
+            for (let depth = 0; depth < 5 && current && current !== chatContent; depth++) {
+                const isCard = current.classList && (current.classList.contains('artifact-card') || current.classList.contains('border') || current.getAttribute('draggable') === 'true');
+                const text = (current.innerText || current.textContent || '').trim();
+                
+                const match = text.match(/([a-zA-Z0-9_\-\.\/]+\.(md|markdown|js|ts|jsx|tsx|py|json|html|css|sh|txt|png|jpg|jpeg|svg|webp|log|pdf))/i);
+                if (match && match[1] && match[1].length >= 4) {
+                    if (!match[1].startsWith('http:') && !match[1].startsWith('https:')) {
+                        candidateFilePath = match[1];
+                        if (isCard) break;
+                    }
+                }
+                current = current.parentElement;
+            }
 
-        // Extract useful identifiers
-        const rawText = (targetEl.innerText || targetEl.textContent || '').trim();
-        const firstLine = rawText.split('\n')[0].trim();
-        const testId = targetEl.getAttribute('data-testid') || (targetEl.querySelector('[data-testid]')?.getAttribute('data-testid')) || '';
-        const ariaLabel = targetEl.getAttribute('aria-label') || '';
-        const tagName = targetEl.tagName.toLowerCase();
+            if (candidateFilePath) {
+                e.preventDefault();
+                e.stopPropagation();
+                openMobileFileViewer(candidateFilePath);
+                return;
+            }
 
-        // Only handle clicks on relevant collapsible/tool/thought/artifact elements
-        const isThought = /Thought|Thinking/i.test(firstLine);
-        const isWorkedFor = /Worked for/i.test(firstLine) || testId === 'worked-for-collapsible';
-        const isTool = /^(Ran|Explored|Running|Run)\b/i.test(firstLine);
-        const isArtifact = targetEl.closest('.artifact-card, div.border.rounded-xl') !== null;
+            // 2. Otherwise locate interactive trigger container (Thought, Worked For, Tool block)
+            const thoughtBtn = e.target.closest('button, div.relative > button, div[role="button"]');
+            const workedForBtn = e.target.closest('button[data-testid="worked-for-collapsible"], button.tabular-nums');
+            const toolRow = e.target.closest('div.group.cursor-pointer, div[role="button"]');
 
-        if (!isThought && !isWorkedFor && !isTool && !isArtifact && !testId) {
-            return; // Not an interactive chat toggle
-        }
+            let targetEl = workedForBtn || thoughtBtn || toolRow;
+            if (!targetEl) {
+                const candidate = e.target.closest('div, span, p, button');
+                if (candidate) {
+                    const txt = (candidate.innerText || candidate.textContent || '').trim();
+                    if (/^(Thought|Thinking|Worked for|Ran\b|Explored\b|Running\b)/i.test(txt)) {
+                        targetEl = candidate;
+                    }
+                }
+            }
 
-        e.preventDefault();
-        e.stopPropagation();
+            if (!targetEl) return;
 
-        // Visual tactile feedback
-        targetEl.style.opacity = '0.6';
-        targetEl.style.transform = 'scale(0.98)';
-        setTimeout(() => {
-            targetEl.style.opacity = '1';
-            targetEl.style.transform = '';
-        }, 180);
+            const rawText = (targetEl.innerText || targetEl.textContent || '').trim();
+            const firstLine = rawText.split('\n')[0].trim();
+            const testId = targetEl.getAttribute('data-testid') || (targetEl.querySelector('[data-testid]')?.getAttribute('data-testid')) || '';
+            const ariaLabel = targetEl.getAttribute('aria-label') || '';
+            const tagName = targetEl.tagName.toLowerCase();
 
-        // Find index among elements with similar firstLine
-        let matchIndex = 0;
-        try {
-            const allMatching = Array.from(chatContent.querySelectorAll(tagName))
-                .filter(el => {
-                    const t = (el.innerText || el.textContent || '').trim().split('\n')[0].trim();
-                    return t && (t === firstLine || t.includes(firstLine) || firstLine.includes(t));
-                });
-            const idx = allMatching.indexOf(targetEl);
-            if (idx >= 0) matchIndex = idx;
-        } catch (e) {}
+            const isThought = /Thought|Thinking/i.test(firstLine);
+            const isWorkedFor = /Worked for/i.test(firstLine) || testId === 'worked-for-collapsible';
+            const isTool = /^(Ran|Explored|Running|Run)\b/i.test(firstLine);
 
-        try {
+            if (!isThought && !isWorkedFor && !isTool && !testId) {
+                return;
+            }
+
+            e.preventDefault();
+            e.stopPropagation();
+
+            targetEl.style.opacity = '0.6';
+            targetEl.style.transform = 'scale(0.98)';
+            setTimeout(() => {
+                targetEl.style.opacity = '1';
+                targetEl.style.transform = '';
+            }, 180);
+
+            let matchIndex = 0;
+            try {
+                const allMatching = Array.from(chatContent.querySelectorAll(tagName))
+                    .filter(el => {
+                        const t = (el.innerText || el.textContent || '').trim().split('\n')[0].trim();
+                        return t && (t === firstLine || t.includes(firstLine) || firstLine.includes(t));
+                    });
+                const idx = allMatching.indexOf(targetEl);
+                if (idx >= 0) matchIndex = idx;
+            } catch (e) {}
+
             await fetchWithAuth('/remote-click', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -1717,12 +1752,230 @@ if (chatContent) {
                 })
             });
 
-            // Fast refresh snapshots so user sees expanded/collapsed state immediately
             setTimeout(loadSnapshot, 150);
             setTimeout(loadSnapshot, 400);
             setTimeout(loadSnapshot, 800);
         } catch (err) {
-            console.warn('Remote click error:', err);
+            console.warn('[Chat Click Error]:', err);
         }
     });
 }
+
+// ==========================================================================
+// 📄 Sovereign Mobile File Viewer, Markdown Renderer & Downloader
+// ==========================================================================
+let currentFileViewerRawContent = '';
+
+function formatBytes(bytes, decimals = 1) {
+    if (!+bytes) return '0 B';
+    const k = 1024;
+    const dm = decimals < 0 ? 0 : decimals;
+    const sizes = ['B', 'KB', 'MB', 'GB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return `${parseFloat((bytes / Math.pow(k, i)).toFixed(dm))} ${sizes[i]}`;
+}
+
+function handleFileOverlayClick(e) {
+    if (e.target.id === 'fileViewerOverlay') {
+        closeMobileFileViewer();
+    }
+}
+
+function closeMobileFileViewer() {
+    const overlay = document.getElementById('fileViewerOverlay');
+    if (overlay) overlay.classList.remove('show');
+}
+
+function copyFileViewerContent() {
+    if (!currentFileViewerRawContent) return;
+    navigator.clipboard.writeText(currentFileViewerRawContent).then(() => {
+        showToast('File content copied to clipboard');
+    }).catch(() => {
+        showToast('Could not copy to clipboard');
+    });
+}
+
+function copySnippetText(btn) {
+    const pre = btn.closest('.file-viewer-code-block')?.querySelector('pre');
+    if (!pre) return;
+    navigator.clipboard.writeText(pre.textContent).then(() => {
+        btn.textContent = '✓ Copied';
+        setTimeout(() => { btn.textContent = 'Copy'; }, 1500);
+    });
+}
+
+function escapeHtmlText(str) {
+    return (str || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+}
+
+function renderMarkdownToHtml(md) {
+    if (!md) return '';
+    let text = md;
+
+    // Code blocks with syntax copy header
+    text = text.replace(/```([a-zA-Z0-9_\-\+\#]*)\n([\s\S]*?)```/g, (match, lang, codeContent) => {
+        const langName = (lang || 'code').toUpperCase();
+        return `
+            <div class="file-viewer-code-block">
+                <div class="file-viewer-code-header">
+                    <span>${langName}</span>
+                    <button class="file-viewer-copy-code-btn" onclick="copySnippetText(this)">Copy</button>
+                </div>
+                <pre><code>${escapeHtmlText(codeContent)}</code></pre>
+            </div>
+        `;
+    });
+
+    // Inline code
+    text = text.replace(/`([^`\n]+)`/g, (match, inline) => {
+        return `<code>${escapeHtmlText(inline)}</code>`;
+    });
+
+    // Tables
+    text = text.replace(/((?:\|[^\n]+\|\r?\n)+)/g, (match) => {
+        const lines = match.trim().split(/\r?\n/).filter(l => l.trim().startsWith('|'));
+        if (lines.length < 2) return match;
+        let html = '<div class="file-viewer-table-wrapper"><table>';
+        lines.forEach((line, idx) => {
+            if (line.includes('---')) return;
+            const cols = line.split('|').slice(1, -1);
+            if (idx === 0) {
+                html += '<thead><tr>' + cols.map(c => `<th>${c.trim()}</th>`).join('') + '</tr></thead><tbody>';
+            } else {
+                html += '<tr>' + cols.map(c => `<td>${c.trim()}</td>`).join('') + '</tr>';
+            }
+        });
+        html += '</tbody></table></div>';
+        return html;
+    });
+
+    // Headings
+    text = text.replace(/^#### (.*$)/gim, '<h4>$1</h4>');
+    text = text.replace(/^### (.*$)/gim, '<h3>$1</h3>');
+    text = text.replace(/^## (.*$)/gim, '<h2>$1</h2>');
+    text = text.replace(/^# (.*$)/gim, '<h1>$1</h1>');
+
+    // Blockquotes
+    text = text.replace(/^\> (.*$)/gim, '<blockquote>$1</blockquote>');
+
+    // Bold & Italic
+    text = text.replace(/\*\*\*(.*?)\*\*\*/g, '<strong><em>$1</em></strong>');
+    text = text.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+    text = text.replace(/\*(.*?)\*/g, '<em>$1</em>');
+
+    // Horizontal rule
+    text = text.replace(/^---$/gim, '<hr style="border:0;border-top:1px solid rgba(255,255,255,0.1);margin:16px 0;">');
+
+    // Unordered lists
+    text = text.replace(/^\s*[\-\*]\s+(.*$)/gim, '<li>$1</li>');
+    text = text.replace(/(<li>.*<\/li>)/gis, '<ul>$1</ul>');
+
+    // Paragraphs
+    const blocks = text.split(/\n\n+/);
+    text = blocks.map(b => {
+        const trimmed = b.trim();
+        if (trimmed.startsWith('<h') || trimmed.startsWith('<div') || trimmed.startsWith('<table') || trimmed.startsWith('<ul') || trimmed.startsWith('<blockquote') || trimmed.startsWith('<hr')) {
+            return trimmed;
+        }
+        return `<p>${trimmed.replace(/\n/g, '<br>')}</p>`;
+    }).join('\n');
+
+    return text;
+}
+
+async function openMobileFileViewer(filePath) {
+    if (!filePath) return;
+    const overlay = document.getElementById('fileViewerOverlay');
+    const filenameEl = document.getElementById('fileViewerFilename');
+    const sizeBadge = document.getElementById('fileViewerSizeBadge');
+    const typeBadge = document.getElementById('fileViewerTypeBadge');
+    const pathPreview = document.getElementById('fileViewerPathPreview');
+    const bodyEl = document.getElementById('fileViewerBody');
+    const downloadBtn = document.getElementById('fileDownloadBtn');
+    const rawBtn = document.getElementById('fileRawBtn');
+    const iconEl = document.getElementById('fileViewerIcon');
+
+    if (!overlay || !bodyEl) return;
+
+    const cleanName = filePath.split('/').pop().split('#')[0] || 'Document';
+    if (filenameEl) filenameEl.textContent = cleanName;
+    if (sizeBadge) sizeBadge.textContent = 'Loading...';
+    if (pathPreview) pathPreview.textContent = filePath;
+    bodyEl.innerHTML = `
+        <div class="file-viewer-loading">
+            <div class="loading-spinner"></div>
+            <p>Loading ${escapeHtmlText(cleanName)}...</p>
+        </div>
+    `;
+
+    overlay.classList.add('show');
+
+    try {
+        const res = await fetchWithAuth(`/api/file/view?path=${encodeURIComponent(filePath)}`);
+        const data = await res.json();
+
+        if (!data.success) {
+            bodyEl.innerHTML = `
+                <div class="file-viewer-loading" style="color:#f87171;">
+                    <div style="font-size:14px;color:#ef4444;font-weight:600;">Error</div>
+                    <p>Could not open file: ${escapeHtmlText(data.error || 'Unknown error')}</p>
+                    <p style="font-size:12px;color:#94a3b8;">Path: ${escapeHtmlText(filePath)}</p>
+                </div>
+            `;
+            return;
+        }
+
+        currentFileViewerRawContent = data.content || '';
+        if (filenameEl) filenameEl.textContent = data.name;
+        if (sizeBadge) sizeBadge.textContent = formatBytes(data.size);
+        if (pathPreview) pathPreview.textContent = data.path;
+
+        if (downloadBtn) downloadBtn.href = `/api/file/download?path=${encodeURIComponent(data.path)}`;
+        if (rawBtn) rawBtn.href = `/api/file/raw?path=${encodeURIComponent(data.path)}`;
+
+        const ext = data.name.split('.').pop().toLowerCase();
+        if (typeBadge) typeBadge.textContent = ext.toUpperCase();
+
+        if (data.isImage) {
+            
+            bodyEl.innerHTML = `
+                <div style="text-align:center;padding:12px 0;">
+                    <img src="${data.dataUrl}" alt="${escapeHtmlText(data.name)}" class="file-viewer-image-preview" />
+                    <p style="font-size:12px;color:#94a3b8;margin-top:8px;">${escapeHtmlText(data.path)}</p>
+                </div>
+            `;
+        } else if (data.isMarkdown) {
+            
+            bodyEl.innerHTML = renderMarkdownToHtml(data.content);
+        } else {
+            
+            bodyEl.innerHTML = `
+                <div class="file-viewer-code-block" style="margin-top:4px;">
+                    <div class="file-viewer-code-header">
+                        <span>${ext.toUpperCase()} SOURCE</span>
+                        <button class="file-viewer-copy-code-btn" onclick="copyFileViewerContent()">Copy All</button>
+                    </div>
+                    <pre><code>${escapeHtmlText(data.content)}</code></pre>
+                </div>
+            `;
+        }
+
+    } catch (err) {
+        bodyEl.innerHTML = `
+            <div class="file-viewer-loading" style="color:#f87171;">
+                <div style="font-size:14px;color:#ef4444;font-weight:600;">Error</div>
+                <p>Network error loading file: ${escapeHtmlText(err.message)}</p>
+            </div>
+        `;
+    }
+}
+
+window.openMobileFileViewer = openMobileFileViewer;
+window.closeMobileFileViewer = closeMobileFileViewer;
+window.copyFileViewerContent = copyFileViewerContent;
+window.handleFileOverlayClick = handleFileOverlayClick;
