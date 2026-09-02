@@ -366,9 +366,15 @@ app.post('/api/tabs/focus', async (req, res) => {
 // Model configuration for delegation
 // Model configuration for delegation
 const AVAILABLE_MODELS = [
-    { index: 0, name: 'Gemini 3.6 Flash (High)', key: 'gemini-flash-high' },
-    { index: 1, name: 'Gemini 3.6 Flash (Medium)', key: 'gemini-flash-medium' },
-    { index: 2, name: 'Gemini 3.6 Flash (Low)', key: 'gemini-flash-low' },
+    { index: 0, name: 'Gemini 3.8 Flash (High)', key: 'gemini-3.8-flash-high' },
+    { index: 1, name: 'Gemini 3.8 Flash (Medium)', key: 'gemini-3.8-flash-medium' },
+    { index: 2, name: 'Gemini 3.8 Flash (Low)', key: 'gemini-3.8-flash-low' },
+    { index: 3, name: 'Gemini 3.7 Flash (High)', key: 'gemini-3.7-flash-high' },
+    { index: 4, name: 'Gemini 3.7 Flash (Medium)', key: 'gemini-3.7-flash-medium' },
+    { index: 5, name: 'Gemini 3.7 Flash (Low)', key: 'gemini-3.7-flash-low' },
+    { index: 6, name: 'Gemini 3.6 Flash (High)', key: 'gemini-flash-high' },
+    { index: 7, name: 'Gemini 3.6 Flash (Medium)', key: 'gemini-flash-medium' },
+    { index: 8, name: 'Gemini 3.6 Flash (Low)', key: 'gemini-flash-low' },
     { index: 3, name: 'Claude Sonnet 4.6 (Thinking)', key: 'claude-sonnet-thinking' },
     { index: 4, name: 'Claude Opus 4.6 (Thinking)', key: 'claude-opus-thinking' },
     { index: 5, name: 'GPT-OSS 120B (Medium)', key: 'gpt-oss-120b' },

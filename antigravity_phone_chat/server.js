@@ -165,30 +165,38 @@ async function discoverCDP() {
             const list = await getJson(`http://127.0.0.1:${port}/json/list`, 1000);
             if (!Array.isArray(list)) return null;
 
-            // Filter out self/3000 pages to avoid loopback
+            // Filter out self/3000 pages, web pages, and remote control suites to avoid loopback/hijacking
             const validList = list.filter(t => {
                 const url = (t.url || "").toLowerCase();
                 const title = (t.title || "").toLowerCase();
-                if (url.includes(":3000") || title.includes("phone connect") || title.includes("gravityremote")) return false;
+                if (url.startsWith("http://") || url.startsWith("https://")) return false;
+                if (url.includes(":3000") || url.includes(":8787") || url.includes(":3001")) return false;
+                if (title.includes("phone connect") || title.includes("gravityrem") || title.includes("remote suite")) return false;
                 return true;
             });
 
-            // Priority 1: Standard Workbench (The main IDE window)
-            const workbench = validList.find(t => t.url?.includes("workbench.html") || (t.title && (t.title.includes("workbench") || t.title.includes("Antigravity IDE"))));
+            // Priority 1: Standard Workbench (The main IDE window) - must be workbench.html
+            const workbench = validList.find(t => t.url?.includes("workbench.html") && !t.url.includes("jetski"));
             if (workbench && workbench.webSocketDebuggerUrl) {
                 return { priority: 1, port, url: workbench.webSocketDebuggerUrl, title: workbench.title };
             }
 
-            // Priority 2: Jetski/Launchpad (Fallback)
-            const jetski = validList.find(t => t.url?.includes("jetski") || t.title === "Launchpad");
-            if (jetski && jetski.webSocketDebuggerUrl) {
-                return { priority: 2, port, url: jetski.webSocketDebuggerUrl, title: jetski.title };
+            // Priority 2: Antigravity Electron Window (vscode-file / vscode-app scheme)
+            const ideWindow = validList.find(t => (t.url?.startsWith("vscode-file:") || t.url?.startsWith("vscode-app:")) && t.title && (t.title.includes("Antigravity") || t.title.includes("workbench")));
+            if (ideWindow && ideWindow.webSocketDebuggerUrl) {
+                return { priority: 2, port, url: ideWindow.webSocketDebuggerUrl, title: ideWindow.title };
             }
 
-            // Priority 3: Any other valid page
-            const page = validList.find(t => t.type === "page" && t.webSocketDebuggerUrl);
+            // Priority 3: Jetski/Launchpad (Fallback)
+            const jetski = validList.find(t => t.url?.includes("jetski") || t.title === "Launchpad");
+            if (jetski && jetski.webSocketDebuggerUrl) {
+                return { priority: 3, port, url: jetski.webSocketDebuggerUrl, title: jetski.title };
+            }
+
+            // Priority 4: Any other valid non-web page
+            const page = validList.find(t => t.type === "page" && !t.url?.startsWith("http://") && !t.url?.startsWith("https://") && t.webSocketDebuggerUrl);
             if (page) {
-                return { priority: 3, port, url: page.webSocketDebuggerUrl, title: page.title };
+                return { priority: 4, port, url: page.webSocketDebuggerUrl, title: page.title };
             }
             return null;
         } catch (e) {
@@ -1219,7 +1227,7 @@ async function setModel(cdp, modelName) {
             
             // Find model selector trigger
             const trigger = document.querySelector('[data-testid="model-selector-trigger"], [data-tooltip-id*="model"], [data-tooltip-id*="provider"]') ||
-                            Array.from(document.querySelectorAll('button, div')).find(el => (el.innerText?.includes('Gemini') || el.innerText?.includes('Claude')) && el.offsetParent !== null);
+                            Array.from(document.querySelectorAll('button, div')).find(el => (el.innerText?.includes('Gemini') || el.innerText?.includes('Claude') || el.innerText?.includes('GPT') || el.innerText?.includes('DeepSeek')) && el.offsetParent !== null);
             if (!trigger) return { error: 'Model selector trigger not found' };
             
             // Trigger open popup
@@ -1420,7 +1428,14 @@ function getLocalBrainChats() {
                     if (line) {
                         const parsed = JSON.parse(line);
                         if (parsed.content) {
-                            title = parsed.content.slice(0, 60).replace(/\n/g, " ");
+                            title = (parsed.content || "")
+                                .replace(/<USER_REQUEST>|<\/USER_REQUEST>/gi, "")
+                                .replace(/<ADDITIONAL_METADATA>[\s\S]*?<\/ADDITIONAL_METADATA>/gi, "")
+                                .replace(/<[^>]+>/g, "")
+                                .trim()
+                                .slice(0, 60)
+                                .replace(/\r?\n/g, " ");
+                            if (!title) title = entry.name;
                         }
                     }
                 }
@@ -3290,6 +3305,13 @@ async function main() {
 
         process.on('SIGINT', () => gracefulShutdown('SIGINT'));
         process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+
+        process.on('unhandledRejection', (reason, promise) => {
+            console.warn('⚠️ [UNHANDLED REJECTION]:', reason?.message || reason);
+        });
+        process.on('uncaughtException', (err) => {
+            console.error('❌ [UNCAUGHT EXCEPTION]:', err?.message || err);
+        });
 
     } catch (err) {
         console.error('❌ Fatal error:', err.message);

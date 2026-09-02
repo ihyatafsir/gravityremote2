@@ -203,14 +203,23 @@ export class CdpBridge {
                 res.on('end', () => {
                     try {
                         const list = JSON.parse(data);
-                        // Priority 1: Main IDE window
-                        let found = list.find(t => t.title && t.title.toLowerCase().includes('antigravity') && t.url.includes('workbench.html') && !t.url.includes('jetski'));
+                        // Filter out browser tabs / web pages
+                        const validList = list.filter(t => {
+                            const url = (t.url || "").toLowerCase();
+                            const title = (t.title || "").toLowerCase();
+                            if (url.startsWith("http://") || url.startsWith("https://")) return false;
+                            if (title.includes("phone connect") || title.includes("gravityrem")) return false;
+                            return true;
+                        });
+
+                        // Priority 1: Main IDE window (workbench.html)
+                        let found = validList.find(t => t.title && t.title.toLowerCase().includes('antigravity') && t.url.includes('workbench.html') && !t.url.includes('jetski'));
                         // Priority 2: Any workbench
-                        if (!found) found = list.find(t => t.url.includes('workbench.html') && !t.url.includes('jetski'));
+                        if (!found) found = validList.find(t => t.url.includes('workbench.html') && !t.url.includes('jetski'));
                         // Priority 3: Jetski agent
-                        if (!found) found = list.find(t => t.url.includes('jetski-agent'));
-                        // Fallback
-                        if (!found) found = list.find(t => t.type === 'page');
+                        if (!found) found = validList.find(t => t.url.includes('jetski-agent'));
+                        // Fallback: non-http page only
+                        if (!found) found = validList.find(t => t.type === 'page');
 
                         resolve(found);
                     } catch (e) {

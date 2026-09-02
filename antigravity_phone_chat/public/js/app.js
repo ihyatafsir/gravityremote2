@@ -149,6 +149,9 @@ checkSslStatus();
 
 // --- Models (Matching Desktop IDE Providers & Submodels) ---
 const MODELS = [
+    "Gemini 3.8 Flash (High)",
+    "Gemini 3.8 Flash (Medium)",
+    "Gemini 3.8 Flash (Low)",
     "Gemini 3.7 Flash (High)",
     "Gemini 3.7 Flash (Medium)",
     "Gemini 3.7 Flash (Low)",
@@ -159,7 +162,8 @@ const MODELS = [
     "Gemini 3.1 Pro (Low)",
     "Claude Sonnet 4.6 (Thinking)",
     "Claude Opus 4.6 (Thinking)",
-    "GPT-OSS 120B (Medium)"
+    "GPT-OSS 120B (Medium)",
+    "DeepSeek R1 (Reasoning)"
 ];
 
 // --- Modal Dialog System (Models, Modes) ---
@@ -169,11 +173,15 @@ function openModal(title, options, onSelect) {
     modalList.innerHTML = '';
 
     const currentVal = (title === 'Select Model' ? (modelText ? modelText.textContent.trim() : '') : (modeText ? modeText.textContent.trim() : ''));
+    const clean = s => (s || '').toLowerCase().replace(/[\(\)\s\-_]/g, '');
+    const cleanCurrent = clean(currentVal);
 
     options.forEach(opt => {
         const div = document.createElement('div');
         div.className = 'modal-option';
-        if (currentVal && (opt.toLowerCase().includes(currentVal.toLowerCase()) || currentVal.toLowerCase().includes(opt.toLowerCase()))) {
+        const cleanOpt = clean(opt);
+        const isActive = cleanCurrent && (cleanOpt === cleanCurrent || (cleanCurrent.length >= 8 && cleanOpt.startsWith(cleanCurrent) && cleanOpt.includes('high')));
+        if (isActive) {
             div.style.background = 'rgba(34, 197, 94, 0.15)';
             div.style.color = '#4ade80';
             div.style.fontWeight = '600';
@@ -1664,20 +1672,15 @@ if (chatContent) {
                 }
             }
 
-            // Check if clicking inside an artifact card or code pill or element with filename
-            let current = e.target;
-            for (let depth = 0; depth < 5 && current && current !== chatContent; depth++) {
-                const isCard = current.classList && (current.classList.contains('artifact-card') || current.classList.contains('border') || current.getAttribute('draggable') === 'true');
-                const text = (current.innerText || current.textContent || '').trim();
-                
-                const match = text.match(/([a-zA-Z0-9_\-\.\/]+\.(md|markdown|js|ts|jsx|tsx|py|json|html|css|sh|txt|png|jpg|jpeg|svg|webp|log|pdf))/i);
-                if (match && match[1] && match[1].length >= 4) {
-                    if (!match[1].startsWith('http:') && !match[1].startsWith('https:')) {
-                        candidateFilePath = match[1];
-                        if (isCard) break;
-                    }
+            // Check if clicking inside a dedicated artifact card or file card (NOT inside code blocks or buttons)
+            const cardEl = e.target.closest('.artifact-card, [data-testid*="artifact"], .file-card');
+            if (cardEl && !e.target.closest('pre, code, button, .mobile-copy-btn, [role="button"]')) {
+                const titleEl = cardEl.querySelector('[data-testid*="title"], h1, h2, h3, h4, span, div');
+                const cardText = (cardEl.getAttribute('data-path') || cardEl.getAttribute('data-filename') || (titleEl ? titleEl.innerText : cardEl.innerText) || '').trim();
+                const match = cardText.match(/([a-zA-Z0-9_\-\.\/]+\.(md|markdown|js|ts|jsx|tsx|py|json|html|css|sh|txt|png|jpg|jpeg|svg|webp|log|pdf))/i);
+                if (match && match[1] && match[1].length >= 4 && !match[1].startsWith('http:') && !match[1].startsWith('https:')) {
+                    candidateFilePath = match[1];
                 }
-                current = current.parentElement;
             }
 
             if (candidateFilePath) {

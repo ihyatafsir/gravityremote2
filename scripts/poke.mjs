@@ -86,21 +86,25 @@ async function main() {
     for (const port of PORTS) {
         try {
             const list = await getJson(`http://127.0.0.1:${port}/json/list`);
-            // Priority 1: Antigravity IDE (localhost:9090 or 'Antigravity' in title)
-            // Priority 2: Standard Workbench (workbench.html)
-            // Priority 3: Any page type (for Chrome browser control)
-            let found = list.find(t =>
-                t.url.includes('localhost:9090') ||
-                (t.title && t.title.toLowerCase().includes('antigravity'))
-            );
+            const validList = list.filter(t => {
+                const url = (t.url || "").toLowerCase();
+                const title = (t.title || "").toLowerCase();
+                if (url.startsWith("http://") || url.startsWith("https://")) return false;
+                if (title.includes("phone connect") || title.includes("gravityrem")) return false;
+                return true;
+            });
 
+            // Priority 1: Standard Workbench (workbench.html)
+            let found = validList.find(t => t.url.includes('workbench.html') && !t.url.includes('jetski'));
+
+            // Priority 2: Antigravity Electron Window
             if (!found) {
-                found = list.find(t => t.url.includes('workbench.html') || (t.title && t.title.includes('workbench')));
+                found = validList.find(t => (t.url.startsWith('vscode-file:') || t.url.startsWith('vscode-app:')) && t.title && t.title.toLowerCase().includes('antigravity'));
             }
 
-            // Fallback: Just pick the first 'page' type target
+            // Fallback: Just pick the first valid non-http 'page' type target
             if (!found) {
-                found = list.find(t => t.type === 'page');
+                found = validList.find(t => t.type === 'page');
             }
 
             if (found && found.webSocketDebuggerUrl) {

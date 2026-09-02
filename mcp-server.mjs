@@ -420,9 +420,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
             case 'list_models': {
                 const models = [
-                    '0: Gemini 3 Pro (High) - key: gemini-pro-high',
-                    '1: Gemini 3 Pro (Low) - key: gemini-pro-low',
-                    '2: Gemini 3 Flash ⚡ - key: gemini-flash',
+                    '0: Gemini 3.8 Flash (High) ⚡ - key: gemini-3.8-flash-high',
+                    '1: Gemini 3.8 Flash (Medium) - key: gemini-3.8-flash-medium',
+                    '2: Gemini 3.8 Flash (Low) - key: gemini-3.8-flash-low',
+                    '3: Gemini 3.7 Flash (High) - key: gemini-3.7-flash-high',
+                    '4: Gemini 3.7 Flash (Medium) - key: gemini-3.7-flash-medium',
+                    '5: Gemini 3.7 Flash (Low) - key: gemini-3.7-flash-low',
+                    '6: Gemini 3 Pro (High) - key: gemini-pro-high',
+                    '7: Gemini 3 Pro (Low) - key: gemini-pro-low',
+                    '8: Gemini 3 Flash ⚡ - key: gemini-flash',
                     '3: Claude Sonnet 4.5 - key: claude-sonnet',
                     '4: Claude Sonnet 4.5 (Thinking) - key: claude-sonnet-thinking',
                     '5: Claude Opus 4.5 (Thinking) 💎 - key: claude-opus-thinking',
